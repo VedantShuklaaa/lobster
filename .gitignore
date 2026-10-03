@@ -1,0 +1,19 @@
+# Rust build output
+/target/
+
+# Profiling output
+perf.data*
+flamegraph.svg
+*.profraw
+
+# Benchmark output
+/target/criterion/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local data (big replay files)
+/data/
+*.csv

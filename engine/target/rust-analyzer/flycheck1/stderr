@@ -1,0 +1,53 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   0.085954834s  INFO prepare_target{force=false package_id=engine v0.1.0 (/Users/vedant/workspace/projects/lobster/engine) target="engine"}: cargo::core::compiler::fingerprint: fingerprint error for engine v0.1.0 (/Users/vedant/workspace/projects/lobster/engine)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("engine", ["lib"], "/Users/vedant/workspace/projects/lobster/engine/src/lib.rs", Edition2024) }
+   0.086055709s  INFO prepare_target{force=false package_id=engine v0.1.0 (/Users/vedant/workspace/projects/lobster/engine) target="engine"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/vedant/workspace/projects/lobster/engine/target/rust-analyzer/debug/.fingerprint/engine-f6aaec4c394f01b1/lib-engine`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <std::backtrace::Backtrace>::create
+   1: <std::backtrace::Backtrace>::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.099434917s  INFO prepare_target{force=false package_id=engine v0.1.0 (/Users/vedant/workspace/projects/lobster/engine) target="engine"}: cargo::core::compiler::fingerprint: fingerprint error for engine v0.1.0 (/Users/vedant/workspace/projects/lobster/engine)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("engine", ["lib"], "/Users/vedant/workspace/projects/lobster/engine/src/lib.rs", Edition2024) }
+   0.099442417s  INFO prepare_target{force=false package_id=engine v0.1.0 (/Users/vedant/workspace/projects/lobster/engine) target="engine"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/vedant/workspace/projects/lobster/engine/target/rust-analyzer/debug/.fingerprint/engine-0426815e6b91a5ca/test-lib-engine`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <std::backtrace::Backtrace>::create
+   1: <std::backtrace::Backtrace>::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+    Checking engine v0.1.0 (/Users/vedant/workspace/projects/lobster/engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.26s
