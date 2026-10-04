@@ -1,5 +1,5 @@
 # Rust build output
-/target/
+target/
 
 # Profiling output
 perf.data*
