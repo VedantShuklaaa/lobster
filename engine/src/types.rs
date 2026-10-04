@@ -25,9 +25,23 @@ pub struct Fill {
     pub qty: Qty,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
-    Add(Order),
+    Add(Order), // limit order
+    Market { id: OrderId, side: Side, qty: Qty },
     Cancel(OrderId),
     Modify { id: OrderId, new_qty: Qty },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RejectReason {
+    NoLiquidity,  // market order, nothing to match
+    UnknownOrder, // cancel/modify of an id not in the book
+    DuplicateId,  // add with an id already live
+    InvalidQty,   // qty == 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    Fill(Fill),
+    Rejected { id: OrderId, reason: RejectReason },
 }
