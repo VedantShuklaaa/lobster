@@ -1,6 +1,9 @@
 pub mod types;
 pub use types::*;
 
+pub mod book;
+pub use book::*;
+
 
 // Design decisions
 //
