@@ -39,7 +39,6 @@ impl OrderBook {
     fn add_limit(&mut self, mut order: Order) -> Vec<Event> {
         let mut events = Vec::new();
 
-        // 1. validate
         if order.qty == 0 {
             events.push(Event::Rejected {
                 id: order.id,
@@ -55,62 +54,14 @@ impl OrderBook {
             return events;
         }
 
-        // 2. match against the opposite side while it crosses
-        while order.qty > 0 {
-            // a) best price on the opposite side
-            let best = match order.side {
-                Side::Bid => self.asks.first_key_value().map(|(p, _)| *p),
-                Side::Ask => self.bids.last_key_value().map(|(p, _)| *p),
-            };
-            let Some(best_price) = best else { break };
+        order.qty = self.match_order(
+            order.id,
+            order.side,
+            Some(order.price),
+            order.qty,
+            &mut events,
+        );
 
-            // b) does it cross?
-            let crosses = match order.side {
-                Side::Bid => order.price >= best_price,
-                Side::Ask => order.price <= best_price,
-            };
-            if !crosses {
-                break;
-            }
-
-            // c) get that level from the opposite side's map
-            let opp = match order.side {
-                Side::Bid => &mut self.asks,
-                Side::Ask => &mut self.bids,
-            };
-            let level = opp.get_mut(&best_price).unwrap();
-
-            // d) fill FIFO within the level
-            while order.qty > 0 {
-                let Some(maker) = level.front_mut() else {
-                    break;
-                };
-                let traded = order.qty.min(maker.qty);
-
-                events.push(Event::Fill(Fill {
-                    maker: maker.id,
-                    taker: order.id,
-                    price: best_price, // maker's price
-                    qty: traded,
-                }));
-
-                order.qty -= traded;
-                maker.qty -= traded;
-
-                if maker.qty == 0 {
-                    let id = maker.id;
-                    level.pop_front();
-                    self.index.remove(&id);
-                }
-            }
-
-            // e) drop the level if it's empty
-            if level.is_empty() {
-                opp.remove(&best_price);
-            }
-        }
-
-        // 3. rest the leftover
         if order.qty > 0 {
             let side_book = match order.side {
                 Side::Bid => &mut self.bids,
@@ -119,14 +70,30 @@ impl OrderBook {
             side_book.entry(order.price).or_default().push_back(order);
             self.index.insert(order.id, (order.side, order.price));
         }
-
         events
     }
 
     fn market(&mut self, id: OrderId, side: Side, qty: u32) -> Vec<Event> {
-        // match like add_limit but with no price limit, never rest.
-        // zero fills -> Rejected { NoLiquidity }; remainder is dropped.
-        todo!()
+        let mut events = Vec::new();
+
+        if qty == 0 {
+            events.push(Event::Rejected {
+                id,
+                reason: RejectReason::InvalidQty,
+            });
+            return events;
+        }
+
+        self.match_order(id, side, None, qty, &mut events);
+
+        // remainder is dropped; nothing filled at all -> reject
+        if events.is_empty() {
+            events.push(Event::Rejected {
+                id,
+                reason: RejectReason::NoLiquidity,
+            });
+        }
+        events
     }
 
     fn cancel(&mut self, id: OrderId) -> Vec<Event> {
@@ -154,11 +121,36 @@ impl OrderBook {
         Vec::new()
     }
 
-    fn modify(&mut self, id: OrderId, new_qty: u32) -> Vec<Event> {
-        // v1 rule: decreasing qty keeps queue position,
-        // increasing qty loses priority (cancel + re-add at the back).
-        // Unknown id -> Rejected { UnknownOrder }, new_qty == 0 -> InvalidQty.
-        todo!()
+    fn modify(&mut self, id: OrderId, new_qty: Qty) -> Vec<Event> {
+        if new_qty == 0 {
+            return vec![Event::Rejected {
+                id,
+                reason: RejectReason::InvalidQty,
+            }];
+        }
+        let Some(&(side, price)) = self.index.get(&id) else {
+            return vec![Event::Rejected {
+                id,
+                reason: RejectReason::UnknownOrder,
+            }];
+        };
+
+        let book = match side {
+            Side::Bid => &mut self.bids,
+            Side::Ask => &mut self.asks,
+        };
+        let level = book.get_mut(&price).unwrap();
+        let pos = level.iter().position(|o| o.id == id).unwrap();
+
+        if new_qty <= level[pos].qty {
+            level[pos].qty = new_qty;
+        } else {
+            let mut order = level.remove(pos).unwrap();
+            order.qty = new_qty;
+            level.push_back(order);
+        }
+
+        Vec::new()
     }
 
     pub fn qty_at(&self, side: Side, price: Price) -> Qty {
@@ -168,5 +160,68 @@ impl OrderBook {
         };
         book.get(&price)
             .map_or(0, |level| level.iter().map(|o| o.qty).sum())
+    }
+
+    /// Matches `qty` against the opposite side. `limit = None` means no price limit (market order).
+    /// Returns the unfilled remainder.
+    fn match_order(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        limit: Option<Price>,
+        mut qty: Qty,
+        events: &mut Vec<Event>,
+    ) -> Qty {
+        while qty > 0 {
+            let best = match side {
+                Side::Bid => self.asks.first_key_value().map(|(p, _)| *p),
+                Side::Ask => self.bids.last_key_value().map(|(p, _)| *p),
+            };
+            let Some(best_price) = best else { break };
+
+            if let Some(limit) = limit {
+                let crosses = match side {
+                    Side::Bid => limit >= best_price,
+                    Side::Ask => limit <= best_price,
+                };
+                if !crosses {
+                    break;
+                }
+            }
+
+            let opp = match side {
+                Side::Bid => &mut self.asks,
+                Side::Ask => &mut self.bids,
+            };
+            let level = opp.get_mut(&best_price).unwrap();
+
+            while qty > 0 {
+                let Some(maker) = level.front_mut() else {
+                    break;
+                };
+                let traded = qty.min(maker.qty);
+
+                events.push(Event::Fill(Fill {
+                    maker: maker.id,
+                    taker: id,
+                    price: best_price,
+                    qty: traded,
+                }));
+
+                qty -= traded;
+                maker.qty -= traded;
+
+                if maker.qty == 0 {
+                    let maker_id = maker.id;
+                    level.pop_front();
+                    self.index.remove(&maker_id);
+                }
+            }
+
+            if level.is_empty() {
+                opp.remove(&best_price);
+            }
+        }
+        qty
     }
 }
