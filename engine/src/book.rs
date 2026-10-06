@@ -1,6 +1,31 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::{Command, Event, Fill, Order, OrderId, Price, Qty, RejectReason, Side};
+use std::hash::{BuildHasherDefault, Hasher};
+
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(*b as u64);
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 #[derive(Default)]
 pub struct OrderBook {
@@ -11,7 +36,7 @@ pub struct OrderBook {
     asks: BTreeMap<Price, VecDeque<Order>>,
 
     /// Where each resting order lives, for cancel/modify.
-    index: HashMap<OrderId, (Side, Price)>,
+    index: FastMap<OrderId, (Side, Price)>,
 }
 
 impl OrderBook {
@@ -230,6 +255,12 @@ impl OrderBook {
             .flat_map(|l| l.iter())
             .map(|o| o.qty as u64)
             .sum()
+    }
+
+    pub fn with_capacity(orders: usize) -> Self {
+        let mut b = Self::default();
+        b.index.reserve(orders);
+        b
     }
 
     #[doc(hidden)]
