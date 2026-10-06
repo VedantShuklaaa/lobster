@@ -2,7 +2,7 @@
 
 A limit order book matching engine in Rust, built to explore low-latency systems design: cache-friendly data structures, allocation-free hot paths, and honest measurement.
 
-> Status: v1 (naive, correct, measured). v2 (array-indexed levels + slab) in progress.
+> Status: v2 (slab + intrusive lists, O(1) cancel) done. Event buffer and further tuning next.
 
 ## What is an order book?
 
@@ -63,15 +63,15 @@ lobster/
 └── bench/              criterion throughput bench + latency percentile binary
 ```
 
-### Data model (v1)
+### Data model (v2)
 
 ```
-bids:  BTreeMap<Price, VecDeque<Order>>   best = last key
-asks:  BTreeMap<Price, VecDeque<Order>>   best = first key
-index: HashMap<OrderId, (Side, Price)>    locates a resting order for cancel/modify
+bids/asks: BTreeMap<Price, Level> Level = { head, tail } slot indices
+slab: Vec<Node> Node = { order, prev, next }, free list for reuse
+index: FastMap<OrderId, slot> Fx-hashed, sized to the workload
 ```
 
-Prices and quantities are integers (`u32` ticks and lots). Never floats.
+Resting orders live in one slab. Each price level is an intrusive doubly linked list of slab slots, so cancel is O(1): look up the slot, unlink, push it on the free list. No per-level allocation. Prices and quantities are integers (`u32` ticks and lots), never floats.
 
 ## Order semantics
 
@@ -114,33 +114,44 @@ cargo run --release -p bench --bin latency  # per-op percentiles
 
 ### Results
 
-Machine: \_Apple M5 air 15'? / RAM\_16GB, macOS, plugged in, nothing else running.
+Machine: Apple M5 MacBook Air, 16 GB RAM, macOS, plugged in, nothing else running.
 
 | Version | Replay throughput | Mean/op | p50 | p90 | p99 | p99.9 | max |
 |---|---|---|---|---|---|---|---|
 | v1: BTreeMap + VecDeque | 21.8 M ops/s | ~46 ns | 10 ns\* | 51 ns | 93 ns | 177 ns | 66.6 µs |
-| v1.1: + fast hasher, index sized to workload (16k) | 28.0 M ops/s | 13 ns\* | 13 ns\* | 96 ns | 179 ns | ~18-37 µs |
-| v2: slab + intrusive level lists (O(1) cancel) | 32.5 M ops/s | 11 ns\* | 12 ns\* | 54 ns | 137 ns | 14.7 µs |
+| v1.1: + fast hasher, index sized to workload (16k) | 28.0 M ops/s | ~36 ns | 13 ns\* | 13 ns\* | 96 ns | 179 ns | ~18-37 µs |
+| v2: slab + intrusive level lists (O(1) cancel) | 32.5 M ops/s | ~31 ns | 11 ns\* | 12 ns\* | 54 ns | 137 ns | 14.7 µs |
 
-\* within timer noise (timer overhead 32 ns).
+\* Latency percentiles are quantized to about 42 ns (the `Instant` tick on Apple Silicon is 24 MHz), so p50/p90 are not meaningful per-op numbers and single-tick differences in p99 are noise. Trust throughput and the tail trend.
 
-Workload: 1,000,000 commands, seed 42. Throughput is criterion's median over 10 samples (95% interval 21.0 to 22.2 M ops/s). Percentiles are per `apply` call with timer overhead subtracted.
+Throughput is criterion's median over 10 samples; mean/op is 1 / throughput. Percentiles are per `apply` call with timer overhead subtracted. Workload: 1,000,000 commands, seed 42.
 
-Known costs in v1, which v2 targets:
+### What the profiles showed
+
+v1 (samply): `HashMap` index removal 13%, `add_limit` 19%, `cancel` 8% (linear level scan), malloc/free about 10%. The `BTreeMap` itself was under 1%, so array-indexed price levels were deliberately **not** the first optimization.
+
+### Tried and rejected
+
+Pre-sizing the index to 1M entries. Peak live orders in this workload is about 8.6k, so the oversized table caused cache/TLB misses: p99.9 rose from about 180 ns to 700-1000 ns. Sized to about 2x peak, it stays hot in cache.
+
+### Remaining costs
 
 * `apply` allocates a `Vec<Event>` on every call
-* `BTreeMap` pointer-chasing and node allocation per new price level
-* `VecDeque` cancel scans the level linearly (O(level length))
-* `HashMap` with the default SipHash hasher
+* `BTreeMap` node allocation when a new price level appears
+* Hashing on the id index (now Fx, but still a hash lookup per order)
 
 ## Roadmap
 
 * \[x] v1: naive book, full test suite, property tests, baseline numbers
-* \[ ] Flamegraph of v1 to find the real bottleneck
-* \[ ] Per-operation-type latency breakdown (add, cancel, market, modify)
-* \[ ] v2: array-indexed price levels, slab-allocated orders, intrusive index links (O(1) cancel), caller-provided event buffer (no allocation on the hot path)
-* \[ ] v3: cache-line layout tuning, faster hasher or dense id index
-* \[ ] Event for successful cancels (`Cancelled { id }`)
+* \[x] Profile v1 (samply) to find the real bottleneck
+* \[x] v1.1: fast hasher, workload-sized index
+* \[x] v2: slab-allocated orders, intrusive level lists (O(1) cancel)
+* \[ ] Re-profile v2
+* \[ ] v3: caller-provided event buffer (no allocation on the hot path)
+* \[ ] Array-indexed price levels, only if the tree shows up in the v2 profile
+* \[ ] Dense id index (slab handle) instead of a hash map
+* \[ ] Per-operation-type latency breakdown (batched timing, to get under the 42 ns tick)
+* \[ ] `Cancelled { id }` event for successful cancels
 * \[ ] Replay of real market data (L2/L3) instead of synthetic only
 
 ### Planned experiment: tiered regional books
