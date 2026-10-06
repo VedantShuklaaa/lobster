@@ -162,8 +162,6 @@ impl OrderBook {
             .map_or(0, |level| level.iter().map(|o| o.qty).sum())
     }
 
-    /// Matches `qty` against the opposite side. `limit = None` means no price limit (market order).
-    /// Returns the unfilled remainder.
     fn match_order(
         &mut self,
         id: OrderId,
@@ -223,5 +221,39 @@ impl OrderBook {
             }
         }
         qty
+    }
+
+    pub fn total_qty(&self) -> u64 {
+        self.bids
+            .values()
+            .chain(self.asks.values())
+            .flat_map(|l| l.iter())
+            .map(|o| o.qty as u64)
+            .sum()
+    }
+
+    #[doc(hidden)]
+    pub fn check_invariants(&self) {
+        if let (Some(b), Some(a)) = (self.best_bid(), self.best_ask()) {
+            assert!(b < a, "crossed book: bid {b} >= ask {a}");
+        }
+        let mut count = 0;
+        for (side, book) in [(Side::Bid, &self.bids), (Side::Ask, &self.asks)] {
+            for (price, level) in book {
+                assert!(!level.is_empty(), "empty level at {price}");
+                for o in level {
+                    assert_eq!(o.side, side);
+                    assert_eq!(o.price, *price);
+                    assert!(o.qty > 0, "zero-qty resting order {}", o.id);
+                    assert_eq!(
+                        self.index.get(&o.id),
+                        Some(&(side, *price)),
+                        "index mismatch"
+                    );
+                    count += 1;
+                }
+            }
+        }
+        assert_eq!(count, self.index.len(), "index has orphan entries");
     }
 }

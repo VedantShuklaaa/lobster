@@ -25,6 +25,7 @@ pub struct Fill {
     pub qty: Qty,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Add(Order), // limit order
     Market { id: OrderId, side: Side, qty: Qty },
