@@ -130,9 +130,28 @@ impl OrderBook {
     }
 
     fn cancel(&mut self, id: OrderId) -> Vec<Event> {
-        // look up index -> find level -> remove the order from the VecDeque
-        // drop the level if empty. Unknown id -> Rejected { UnknownOrder }.
-        todo!()
+        let Some((side, price)) = self.index.remove(&id) else {
+            return vec![Event::Rejected {
+                id,
+                reason: RejectReason::UnknownOrder,
+            }];
+        };
+
+        let book = match side {
+            Side::Bid => &mut self.bids,
+            Side::Ask => &mut self.asks,
+        };
+
+        if let Some(level) = book.get_mut(&price) {
+            if let Some(pos) = level.iter().position(|o| o.id == id) {
+                level.remove(pos);
+            }
+
+            if level.is_empty() {
+                book.remove(&price);
+            }
+        }
+        Vec::new()
     }
 
     fn modify(&mut self, id: OrderId, new_qty: u32) -> Vec<Event> {

@@ -107,3 +107,49 @@ fn rejects_zero_qty_and_duplicate_id() {
         }]
     );
 }
+
+#[test]
+fn cancel_removes_resting_order() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Bid, 100, 10));
+    assert!(book.apply(Command::Cancel(1)).is_empty());
+    assert_eq!(book.best_bid(), None);
+}
+
+#[test]
+fn cancel_keeps_other_orders_at_same_level() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Ask, 100, 7));
+    book.apply(Command::Cancel(1));
+    assert_eq!(book.qty_at(Side::Ask, 100), 7);
+    // order 2 is now first in the queue
+    let ev = book.apply(add(3, Side::Bid, 100, 7));
+    assert_eq!(ev, vec![fill(2, 3, 100, 7)]);
+}
+
+#[test]
+fn cancel_unknown_id_rejects() {
+    let mut book = OrderBook::new();
+    assert_eq!(
+        book.apply(Command::Cancel(99)),
+        vec![Event::Rejected {
+            id: 99,
+            reason: RejectReason::UnknownOrder
+        }]
+    );
+}
+
+#[test]
+fn cancel_after_full_fill_rejects() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Bid, 100, 5)); // order 1 fully filled
+    assert_eq!(
+        book.apply(Command::Cancel(1)),
+        vec![Event::Rejected {
+            id: 1,
+            reason: RejectReason::UnknownOrder
+        }]
+    );
+}
