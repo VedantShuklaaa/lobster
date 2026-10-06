@@ -39,6 +39,7 @@ pub enum RejectReason {
     UnknownOrder, // cancel/modify of an id not in the book
     DuplicateId,  // add with an id already live
     InvalidQty,   // qty == 0
+    PriceOutOfRange,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -9,7 +9,7 @@ fn replay(c: &mut Criterion) {
     let mut g = c.benchmark_group("replay");
     g.throughput(Throughput::Elements(cmds.len() as u64));
     g.sample_size(10);
-    g.bench_function("v3_event_buf", |b| {
+    g.bench_function("v4_array_levels", |b| {
         b.iter(|| {
             // ~2x peak live orders (8.6k) for this workload
             let mut book = OrderBook::with_capacity(1 << 14);

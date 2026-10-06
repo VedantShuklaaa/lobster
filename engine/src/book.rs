@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::{Command, Event, Fill, Order, OrderId, Price, Qty, RejectReason, Side};
-use std::hash::{BuildHasherDefault, Hasher};
 
 #[derive(Default, Clone, Copy)]
 pub struct FxHasher {
@@ -28,6 +28,8 @@ impl Hasher for FxHasher {
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 const NIL: u32 = u32::MAX;
+/// Default number of price ticks per side. Prices must be below this.
+const DEFAULT_LEVELS: usize = 1 << 16;
 
 #[derive(Clone, Copy)]
 struct Node {
@@ -41,6 +43,11 @@ struct Level {
     head: u32,
     tail: u32,
 }
+
+const EMPTY: Level = Level {
+    head: NIL,
+    tail: NIL,
+};
 
 struct Slab {
     nodes: Vec<Node>,
@@ -98,9 +105,73 @@ impl Slab {
     }
 }
 
+/// One side of the book: a direct-indexed array of price levels.
+struct Ladder {
+    levels: Vec<Level>,
+    /// Best price with resting orders (highest for bids, lowest for asks).
+    best: Option<Price>,
+    /// Number of non-empty levels.
+    active: u32,
+    is_bid: bool,
+}
+
+impl Ladder {
+    fn new(n: usize, is_bid: bool) -> Self {
+        Self {
+            levels: vec![EMPTY; n],
+            best: None,
+            active: 0,
+            is_bid,
+        }
+    }
+
+    fn push_back(&mut self, slab: &mut Slab, price: Price, slot: u32) {
+        let level = &mut self.levels[price as usize];
+        let was_empty = level.head == NIL;
+        slab.push_back(level, slot);
+        if was_empty {
+            self.active += 1;
+            self.best = Some(match self.best {
+                None => price,
+                Some(b) if self.is_bid => b.max(price),
+                Some(b) => b.min(price),
+            });
+        }
+    }
+
+    fn unlink(&mut self, slab: &mut Slab, price: Price, slot: u32) {
+        let level = &mut self.levels[price as usize];
+        slab.unlink(level, slot);
+        if level.head == NIL {
+            self.level_emptied(price);
+        }
+    }
+
+    fn level_emptied(&mut self, price: Price) {
+        self.active -= 1;
+        if self.active == 0 {
+            self.best = None;
+        } else if self.best == Some(price) {
+            // every other non-empty level is at a worse price, so this terminates
+            let mut p = price as usize;
+            loop {
+                if self.is_bid {
+                    p -= 1;
+                } else {
+                    p += 1;
+                }
+                if self.levels[p].head != NIL {
+                    break;
+                }
+            }
+            self.best = Some(p as Price);
+        }
+    }
+}
+
 pub struct OrderBook {
-    bids: BTreeMap<Price, Level>,
-    asks: BTreeMap<Price, Level>,
+    bids: Ladder,
+    asks: Ladder,
     slab: Slab,
     index: FastMap<OrderId, u32>,
 }
@@ -117,11 +188,16 @@ impl OrderBook {
     }
 
     pub fn with_capacity(orders: usize) -> Self {
+        Self::with_config(orders, DEFAULT_LEVELS)
+    }
+
+    /// `price_levels`: prices must be < this. `orders`: pre-sizes the slab and index.
+    pub fn with_config(orders: usize, price_levels: usize) -> Self {
         let mut index = FastMap::default();
         index.reserve(orders);
         Self {
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
+            bids: Ladder::new(price_levels, true),
+            asks: Ladder::new(price_levels, false),
             slab: Slab {
                 nodes: Vec::with_capacity(orders),
                 free: NIL,
@@ -131,11 +207,11 @@ impl OrderBook {
     }
 
     pub fn best_bid(&self) -> Option<Price> {
-        self.bids.last_key_value().map(|(p, _)| *p)
+        self.bids.best
     }
 
     pub fn best_ask(&self) -> Option<Price> {
-        self.asks.first_key_value().map(|(p, _)| *p)
+        self.asks.best
     }
 
     pub fn live_orders(&self) -> usize {
@@ -148,6 +224,7 @@ impl OrderBook {
         out
     }
 
+    /// Hot-path entry point. Appends events to `out`; the caller clears and reuses the buffer.
     pub fn apply_into(&mut self, cmd: Command, out: &mut Vec<Event>) {
         match cmd {
             Command::Add(order) => self.add_limit(order, out),
@@ -165,12 +242,13 @@ impl OrderBook {
         mut qty: Qty,
         events: &mut Vec<Event>,
     ) -> Qty {
+        let opp = match side {
+            Side::Bid => &mut self.asks,
+            Side::Ask => &mut self.bids,
+        };
+
         while qty > 0 {
-            let best = match side {
-                Side::Bid => self.asks.first_key_value().map(|(p, _)| *p),
-                Side::Ask => self.bids.last_key_value().map(|(p, _)| *p),
-            };
-            let Some(best_price) = best else { break };
+            let Some(best_price) = opp.best else { break };
 
             if let Some(limit) = limit {
                 let crosses = match side {
@@ -182,14 +260,11 @@ impl OrderBook {
                 }
             }
 
-            let opp = match side {
-                Side::Bid => &mut self.asks,
-                Side::Ask => &mut self.bids,
-            };
-            let level = opp.get_mut(&best_price).unwrap();
-
-            while qty > 0 && level.head != NIL {
-                let s = level.head;
+            while qty > 0 {
+                let s = opp.levels[best_price as usize].head;
+                if s == NIL {
+                    break; // level emptied, opp.best already advanced
+                }
                 let node = &mut self.slab.nodes[s as usize];
                 let traded = qty.min(node.order.qty);
 
@@ -205,14 +280,10 @@ impl OrderBook {
 
                 if node.order.qty == 0 {
                     let maker_id = node.order.id;
-                    self.slab.unlink(level, s);
+                    opp.unlink(&mut self.slab, best_price, s);
                     self.slab.release(s);
                     self.index.remove(&maker_id);
                 }
-            }
-
-            if level.head == NIL {
-                opp.remove(&best_price);
             }
         }
         qty
@@ -223,6 +294,13 @@ impl OrderBook {
             out.push(Event::Rejected {
                 id: order.id,
                 reason: RejectReason::InvalidQty,
+            });
+            return;
+        }
+        if order.price as usize >= self.bids.levels.len() {
+            out.push(Event::Rejected {
+                id: order.id,
+                reason: RejectReason::PriceOutOfRange,
             });
             return;
         }
@@ -238,15 +316,11 @@ impl OrderBook {
 
         if order.qty > 0 {
             let s = self.slab.alloc(order);
-            let book = match order.side {
+            let ladder = match order.side {
                 Side::Bid => &mut self.bids,
                 Side::Ask => &mut self.asks,
             };
-            let level = book.entry(order.price).or_insert(Level {
-                head: NIL,
-                tail: NIL,
-            });
-            self.slab.push_back(level, s);
+            ladder.push_back(&mut self.slab, order.price, s);
             self.index.insert(order.id, s);
         }
     }
@@ -279,16 +353,12 @@ impl OrderBook {
         };
 
         let Order { side, price, .. } = self.slab.nodes[s as usize].order;
-        let book = match side {
+        let ladder = match side {
             Side::Bid => &mut self.bids,
             Side::Ask => &mut self.asks,
         };
-        let level = book.get_mut(&price).unwrap();
-        self.slab.unlink(level, s);
+        ladder.unlink(&mut self.slab, price, s);
         self.slab.release(s);
-        if level.head == NIL {
-            book.remove(&price);
-        }
     }
 
     fn modify(&mut self, id: OrderId, new_qty: Qty, out: &mut Vec<Event>) {
@@ -316,11 +386,15 @@ impl OrderBook {
         // increase: lose priority, move to the back of the level
         node.order.qty = new_qty;
         let Order { side, price, .. } = node.order;
-        let book = match side {
+        let ladder = match side {
             Side::Bid => &mut self.bids,
             Side::Ask => &mut self.asks,
         };
-        let level = book.get_mut(&price).unwrap();
+        let level = &mut ladder.levels[price as usize];
+        if level.tail == s {
+            return; // already at the back
+        }
+        // not the tail, so other orders remain: the level never empties here
         self.slab.unlink(level, s);
         self.slab.push_back(level, s);
     }
@@ -337,11 +411,11 @@ impl OrderBook {
     }
 
     pub fn qty_at(&self, side: Side, price: Price) -> Qty {
-        let book = match side {
+        let ladder = match side {
             Side::Bid => &self.bids,
             Side::Ask => &self.asks,
         };
-        let Some(&level) = book.get(&price) else {
+        let Some(&level) = ladder.levels.get(price as usize) else {
             return 0;
         };
         let mut sum = 0;
@@ -351,8 +425,10 @@ impl OrderBook {
 
     pub fn total_qty(&self) -> u64 {
         let mut sum = 0u64;
-        for level in self.bids.values().chain(self.asks.values()) {
-            self.walk(*level, |o| sum += o.qty as u64);
+        for ladder in [&self.bids, &self.asks] {
+            for level in &ladder.levels {
+                self.walk(*level, |o| sum += o.qty as u64);
+            }
         }
         sum
     }
@@ -363,18 +439,28 @@ impl OrderBook {
             assert!(b < a, "crossed book: bid {b} >= ask {a}");
         }
         let mut count = 0;
-        for (side, book) in [(Side::Bid, &self.bids), (Side::Ask, &self.asks)] {
-            for (price, level) in book {
-                assert!(
-                    level.head != NIL && level.tail != NIL,
-                    "empty level at {price}"
-                );
+        for ladder in [&self.bids, &self.asks] {
+            let side = if ladder.is_bid { Side::Bid } else { Side::Ask };
+            let mut active = 0u32;
+            let mut best: Option<Price> = None;
+            for (p, level) in ladder.levels.iter().enumerate() {
+                let price = p as Price;
+                if level.head == NIL {
+                    assert_eq!(level.tail, NIL, "half-empty level at {price}");
+                    continue;
+                }
+                active += 1;
+                best = Some(match best {
+                    None => price,
+                    Some(b) if ladder.is_bid => b.max(price),
+                    Some(b) => b.min(price),
+                });
                 let (mut s, mut prev) = (level.head, NIL);
                 while s != NIL {
                     let n = &self.slab.nodes[s as usize];
                     assert_eq!(n.prev, prev, "broken prev link");
                     assert_eq!(n.order.side, side);
-                    assert_eq!(n.order.price, *price);
+                    assert_eq!(n.order.price, price);
                     assert!(n.order.qty > 0, "zero-qty resting order {}", n.order.id);
                     assert_eq!(self.index.get(&n.order.id), Some(&s), "index mismatch");
                     count += 1;
@@ -383,6 +469,8 @@ impl OrderBook {
                 }
                 assert_eq!(prev, level.tail, "tail mismatch");
             }
+            assert_eq!(active, ladder.active, "active level count mismatch");
+            assert_eq!(best, ladder.best, "cached best price mismatch");
         }
         assert_eq!(count, self.index.len(), "index has orphan entries");
     }

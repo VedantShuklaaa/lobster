@@ -284,3 +284,47 @@ fn apply_into_appends_and_does_not_clear() {
         ]
     );
 }
+
+#[test]
+fn price_out_of_range_rejects() {
+    let mut book = OrderBook::with_config(16, 128);
+    assert_eq!(
+        book.apply(add(1, Side::Bid, 128, 5)),
+        vec![Event::Rejected {
+            id: 1,
+            reason: RejectReason::PriceOutOfRange
+        }]
+    );
+    assert_eq!(book.best_bid(), None);
+}
+
+#[test]
+fn best_ask_advances_when_level_empties() {
+    let mut book = OrderBook::with_config(16, 128);
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Ask, 105, 5));
+    book.apply(add(3, Side::Bid, 100, 5)); // fills order 1, level 100 empties
+    assert_eq!(book.best_ask(), Some(105));
+    book.apply(Command::Cancel(2));
+    assert_eq!(book.best_ask(), None);
+}
+
+#[test]
+fn best_bid_falls_back_after_cancel() {
+    let mut book = OrderBook::with_config(16, 128);
+    book.apply(add(1, Side::Bid, 99, 5));
+    book.apply(add(2, Side::Bid, 100, 5));
+    book.apply(Command::Cancel(2));
+    assert_eq!(book.best_bid(), Some(99));
+    book.apply(Command::Cancel(1));
+    assert_eq!(book.best_bid(), None);
+}
+
+#[test]
+fn modify_up_of_sole_order_keeps_level() {
+    let mut book = OrderBook::with_config(16, 128);
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(Command::Modify { id: 1, new_qty: 9 });
+    assert_eq!(book.best_ask(), Some(100));
+    assert_eq!(book.qty_at(Side::Ask, 100), 9);
+}

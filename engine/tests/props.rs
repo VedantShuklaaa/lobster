@@ -8,7 +8,7 @@ fn side() -> impl Strategy<Value = Side> {
 // Small id/price ranges on purpose: forces duplicates, unknown ids, crossing.
 fn cmd() -> impl Strategy<Value = Command> {
     prop_oneof![
-        4 => (1u64..40, side(), 95u32..=105, 0u32..=10)
+        4 => (1u64..40, side(), 95u32..=110, 0u32..=10)
             .prop_map(|(id, side, price, qty)| Command::Add(Order { id, side, price, qty })),
         1 => (1u64..40, side(), 0u32..=15)
             .prop_map(|(id, side, qty)| Command::Market { id, side, qty }),
@@ -21,7 +21,7 @@ fn cmd() -> impl Strategy<Value = Command> {
 proptest! {
     #[test]
     fn invariants_hold(cmds in prop::collection::vec(cmd(), 1..300)) {
-        let mut book = OrderBook::new();
+        let mut book = OrderBook::with_config(64, 108);
         for c in cmds {
             let before = book.total_qty() as i64;
             let events = book.apply(c);
