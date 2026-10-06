@@ -17,3 +17,4 @@ flamegraph.svg
 # Local data (big replay files)
 /data/
 *.csv
+profile.json*
