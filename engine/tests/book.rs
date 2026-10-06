@@ -107,3 +107,136 @@ fn rejects_zero_qty_and_duplicate_id() {
         }]
     );
 }
+
+#[test]
+fn cancel_removes_resting_order() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Bid, 100, 10));
+    assert!(book.apply(Command::Cancel(1)).is_empty());
+    assert_eq!(book.best_bid(), None);
+}
+
+#[test]
+fn cancel_keeps_other_orders_at_same_level() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Ask, 100, 7));
+    book.apply(Command::Cancel(1));
+    assert_eq!(book.qty_at(Side::Ask, 100), 7);
+    // order 2 is now first in the queue
+    let ev = book.apply(add(3, Side::Bid, 100, 7));
+    assert_eq!(ev, vec![fill(2, 3, 100, 7)]);
+}
+
+#[test]
+fn cancel_unknown_id_rejects() {
+    let mut book = OrderBook::new();
+    assert_eq!(
+        book.apply(Command::Cancel(99)),
+        vec![Event::Rejected {
+            id: 99,
+            reason: RejectReason::UnknownOrder
+        }]
+    );
+}
+
+#[test]
+fn cancel_after_full_fill_rejects() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Bid, 100, 5)); // order 1 fully filled
+    assert_eq!(
+        book.apply(Command::Cancel(1)),
+        vec![Event::Rejected {
+            id: 1,
+            reason: RejectReason::UnknownOrder
+        }]
+    );
+}
+
+fn market(id: u64, side: Side, qty: u32) -> Command {
+    Command::Market { id, side, qty }
+}
+
+#[test]
+fn market_sweeps_levels() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Ask, 101, 5));
+    let ev = book.apply(market(3, Side::Bid, 8));
+    assert_eq!(ev, vec![fill(1, 3, 100, 5), fill(2, 3, 101, 3)]);
+    assert_eq!(book.qty_at(Side::Ask, 101), 2);
+}
+
+#[test]
+fn market_remainder_is_dropped_not_rested() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    let ev = book.apply(market(2, Side::Bid, 20));
+    assert_eq!(ev, vec![fill(1, 2, 100, 5)]);
+    assert_eq!(book.best_bid(), None); // nothing rested
+    assert_eq!(book.best_ask(), None);
+}
+
+#[test]
+fn market_into_empty_book_rejects() {
+    let mut book = OrderBook::new();
+    assert_eq!(
+        book.apply(market(1, Side::Bid, 10)),
+        vec![Event::Rejected {
+            id: 1,
+            reason: RejectReason::NoLiquidity
+        }]
+    );
+}
+
+#[test]
+fn market_sell_hits_best_bid_first() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Bid, 99, 5));
+    book.apply(add(2, Side::Bid, 100, 5));
+    let ev = book.apply(market(3, Side::Ask, 7));
+    assert_eq!(ev, vec![fill(2, 3, 100, 5), fill(1, 3, 99, 2)]);
+}
+
+#[test]
+fn modify_decrease_keeps_priority() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 10));
+    book.apply(add(2, Side::Ask, 100, 10));
+    book.apply(Command::Modify { id: 1, new_qty: 4 });
+    let ev = book.apply(add(3, Side::Bid, 100, 6));
+    // order 1 still first: 4 from it, then 2 from order 2
+    assert_eq!(ev, vec![fill(1, 3, 100, 4), fill(2, 3, 100, 2)]);
+}
+
+#[test]
+fn modify_increase_loses_priority() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Ask, 100, 5));
+    book.apply(Command::Modify { id: 1, new_qty: 8 });
+    let ev = book.apply(add(3, Side::Bid, 100, 6));
+    // order 2 now first
+    assert_eq!(ev, vec![fill(2, 3, 100, 5), fill(1, 3, 100, 1)]);
+}
+
+#[test]
+fn modify_rejects_unknown_and_zero() {
+    let mut book = OrderBook::new();
+    assert_eq!(
+        book.apply(Command::Modify { id: 9, new_qty: 5 }),
+        vec![Event::Rejected {
+            id: 9,
+            reason: RejectReason::UnknownOrder
+        }]
+    );
+    book.apply(add(1, Side::Bid, 100, 5));
+    assert_eq!(
+        book.apply(Command::Modify { id: 1, new_qty: 0 }),
+        vec![Event::Rejected {
+            id: 1,
+            reason: RejectReason::InvalidQty
+        }]
+    );
+}
