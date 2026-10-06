@@ -265,3 +265,22 @@ fn slots_are_reused_after_cancel_and_fill() {
         assert_eq!(book.best_ask(), None);
     }
 }
+
+#[test]
+fn apply_into_appends_and_does_not_clear() {
+    let mut book = OrderBook::new();
+    let mut out = Vec::new();
+    book.apply_into(add(1, Side::Ask, 100, 5), &mut out);
+    book.apply_into(add(2, Side::Bid, 100, 5), &mut out);
+    book.apply_into(Command::Cancel(99), &mut out);
+    assert_eq!(
+        out,
+        vec![
+            fill(1, 2, 100, 5),
+            Event::Rejected {
+                id: 99,
+                reason: RejectReason::UnknownOrder
+            }
+        ]
+    );
+}

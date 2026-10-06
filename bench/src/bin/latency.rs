@@ -6,14 +6,16 @@ use generator::{GenConfig, generate};
 
 fn main() {
     let cmds = generate(&GenConfig::default());
+    let mut out = Vec::with_capacity(64);
 
-    // capacity: a number, or "auto" (= 2 * peak live orders), default 1<<20
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "1048576".into());
+    // capacity: a number, or "auto" (= 2 * peak live orders), default 1<<14
+    let arg = std::env::args().nth(1).unwrap_or_else(|| "16384".into());
     let cap: usize = if arg == "auto" {
         let mut probe = OrderBook::new();
         let mut peak = 0usize;
         for c in &cmds {
-            black_box(probe.apply(*c));
+            out.clear();
+            probe.apply_into(*c, &mut out);
             peak = peak.max(probe.live_orders());
         }
         println!("peak live orders: {peak}");
@@ -26,7 +28,9 @@ fn main() {
     // warmup on a throwaway book
     let mut warm = OrderBook::with_capacity(cap);
     for c in cmds.iter().take(100_000) {
-        black_box(warm.apply(*c));
+        out.clear();
+        warm.apply_into(*c, &mut out);
+        black_box(&out);
     }
 
     // cost of the timer itself, subtracted from results
@@ -42,8 +46,10 @@ fn main() {
     let mut book = OrderBook::with_capacity(cap);
     let mut lat: Vec<u64> = Vec::with_capacity(cmds.len());
     for c in &cmds {
+        out.clear();
         let t = Instant::now();
-        black_box(book.apply(*c));
+        book.apply_into(*c, &mut out);
+        black_box(&out);
         lat.push(t.elapsed().as_nanos() as u64);
     }
 

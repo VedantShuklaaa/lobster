@@ -143,11 +143,17 @@ impl OrderBook {
     }
 
     pub fn apply(&mut self, cmd: Command) -> Vec<Event> {
+        let mut out = Vec::new();
+        self.apply_into(cmd, &mut out);
+        out
+    }
+
+    pub fn apply_into(&mut self, cmd: Command, out: &mut Vec<Event>) {
         match cmd {
-            Command::Add(order) => self.add_limit(order),
-            Command::Market { id, side, qty } => self.market(id, side, qty),
-            Command::Cancel(id) => self.cancel(id),
-            Command::Modify { id, new_qty } => self.modify(id, new_qty),
+            Command::Add(order) => self.add_limit(order, out),
+            Command::Market { id, side, qty } => self.market(id, side, qty, out),
+            Command::Cancel(id) => self.cancel(id, out),
+            Command::Modify { id, new_qty } => self.modify(id, new_qty, out),
         }
     }
 
@@ -212,31 +218,23 @@ impl OrderBook {
         qty
     }
 
-    fn add_limit(&mut self, mut order: Order) -> Vec<Event> {
-        let mut events = Vec::new();
-
+    fn add_limit(&mut self, mut order: Order, out: &mut Vec<Event>) {
         if order.qty == 0 {
-            events.push(Event::Rejected {
+            out.push(Event::Rejected {
                 id: order.id,
                 reason: RejectReason::InvalidQty,
             });
-            return events;
+            return;
         }
         if self.index.contains_key(&order.id) {
-            events.push(Event::Rejected {
+            out.push(Event::Rejected {
                 id: order.id,
                 reason: RejectReason::DuplicateId,
             });
-            return events;
+            return;
         }
 
-        order.qty = self.match_order(
-            order.id,
-            order.side,
-            Some(order.price),
-            order.qty,
-            &mut events,
-        );
+        order.qty = self.match_order(order.id, order.side, Some(order.price), order.qty, out);
 
         if order.qty > 0 {
             let s = self.slab.alloc(order);
@@ -251,37 +249,33 @@ impl OrderBook {
             self.slab.push_back(level, s);
             self.index.insert(order.id, s);
         }
-        events
     }
 
-    fn market(&mut self, id: OrderId, side: Side, qty: Qty) -> Vec<Event> {
-        let mut events = Vec::new();
-
+    fn market(&mut self, id: OrderId, side: Side, qty: Qty, out: &mut Vec<Event>) {
         if qty == 0 {
-            events.push(Event::Rejected {
+            out.push(Event::Rejected {
                 id,
                 reason: RejectReason::InvalidQty,
             });
-            return events;
+            return;
         }
-
-        self.match_order(id, side, None, qty, &mut events);
-
-        if events.is_empty() {
-            events.push(Event::Rejected {
+        let start = out.len();
+        self.match_order(id, side, None, qty, out);
+        if out.len() == start {
+            out.push(Event::Rejected {
                 id,
                 reason: RejectReason::NoLiquidity,
             });
         }
-        events
     }
 
-    fn cancel(&mut self, id: OrderId) -> Vec<Event> {
+    fn cancel(&mut self, id: OrderId, out: &mut Vec<Event>) {
         let Some(s) = self.index.remove(&id) else {
-            return vec![Event::Rejected {
+            out.push(Event::Rejected {
                 id,
                 reason: RejectReason::UnknownOrder,
-            }];
+            });
+            return;
         };
 
         let Order { side, price, .. } = self.slab.nodes[s as usize].order;
@@ -295,27 +289,28 @@ impl OrderBook {
         if level.head == NIL {
             book.remove(&price);
         }
-        Vec::new()
     }
 
-    fn modify(&mut self, id: OrderId, new_qty: Qty) -> Vec<Event> {
+    fn modify(&mut self, id: OrderId, new_qty: Qty, out: &mut Vec<Event>) {
         if new_qty == 0 {
-            return vec![Event::Rejected {
+            out.push(Event::Rejected {
                 id,
                 reason: RejectReason::InvalidQty,
-            }];
+            });
+            return;
         }
         let Some(&s) = self.index.get(&id) else {
-            return vec![Event::Rejected {
+            out.push(Event::Rejected {
                 id,
                 reason: RejectReason::UnknownOrder,
-            }];
+            });
+            return;
         };
 
         let node = &mut self.slab.nodes[s as usize];
         if new_qty <= node.order.qty {
             node.order.qty = new_qty; // decrease keeps queue position
-            return Vec::new();
+            return;
         }
 
         // increase: lose priority, move to the back of the level
@@ -328,7 +323,6 @@ impl OrderBook {
         let level = book.get_mut(&price).unwrap();
         self.slab.unlink(level, s);
         self.slab.push_back(level, s);
-        Vec::new()
     }
 
     // ---- test/debug helpers ----

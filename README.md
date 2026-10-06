@@ -121,6 +121,7 @@ Machine: Apple M5 MacBook Air, 16 GB RAM, macOS, plugged in, nothing else runnin
 | v1: BTreeMap + VecDeque | 21.8 M ops/s | ~46 ns | 10 ns\* | 51 ns | 93 ns | 177 ns | 66.6 µs |
 | v1.1: + fast hasher, index sized to workload (16k) | 28.0 M ops/s | ~36 ns | 13 ns\* | 13 ns\* | 96 ns | 179 ns | ~18-37 µs |
 | v2: slab + intrusive level lists (O(1) cancel) | 32.5 M ops/s | ~31 ns | 11 ns\* | 12 ns\* | 54 ns | 137 ns | 14.7 µs |
+| v3: caller-provided event buffer (no hot-path allocation) | 48.0 M ops/s | ~21 ns | <1 tick\* | 12 ns\* | 53 ns | 95 ns | 14-17 µs |
 
 \* Latency percentiles are quantized to about 42 ns (the `Instant` tick on Apple Silicon is 24 MHz), so p50/p90 are not meaningful per-op numbers and single-tick differences in p99 are noise. Trust throughput and the tail trend.
 
@@ -136,7 +137,6 @@ Pre-sizing the index to 1M entries. Peak live orders in this workload is about 8
 
 ### Remaining costs
 
-* `apply` allocates a `Vec<Event>` on every call
 * `BTreeMap` node allocation when a new price level appears
 * Hashing on the id index (now Fx, but still a hash lookup per order)
 
@@ -146,8 +146,8 @@ Pre-sizing the index to 1M entries. Peak live orders in this workload is about 8
 * \[x] Profile v1 (samply) to find the real bottleneck
 * \[x] v1.1: fast hasher, workload-sized index
 * \[x] v2: slab-allocated orders, intrusive level lists (O(1) cancel)
-* \[ ] Re-profile v2
-* \[ ] v3: caller-provided event buffer (no allocation on the hot path)
+* \[x] Re-profile v2
+* \[x] v3: caller-provided event buffer (no allocation on the hot path)
 * \[ ] Array-indexed price levels, only if the tree shows up in the v2 profile
 * \[ ] Dense id index (slab handle) instead of a hash map
 * \[ ] Per-operation-type latency breakdown (batched timing, to get under the 42 ns tick)
