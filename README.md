@@ -119,6 +119,7 @@ Machine: _Apple M5 air 15'? / RAM_16GB, macOS, plugged in, nothing else running.
 | Version | Replay throughput | Mean/op | p50 | p90 | p99 | p99.9 | max |
 |---|---|---|---|---|---|---|---|
 | v1: BTreeMap + VecDeque | 21.8 M ops/s | ~46 ns | 10 ns* | 51 ns | 93 ns | 177 ns | 66.6 µs |
+| v1.1: + fast hasher, index sized to workload (16k) | 28.0 M ops/s | 13 ns* | 13 ns* | 96 ns | 179 ns | ~18-37 µs |
 
 \* within timer noise (timer overhead 32 ns).
 

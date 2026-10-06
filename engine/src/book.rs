@@ -52,6 +52,10 @@ impl OrderBook {
         self.asks.first_key_value().map(|(price, _)| *price)
     }
 
+    pub fn live_orders(&self) -> usize {
+        self.index.len()
+    }
+
     pub fn apply(&mut self, cmd: Command) -> Vec<Event> {
         match cmd {
             Command::Add(order) => self.add_limit(order),

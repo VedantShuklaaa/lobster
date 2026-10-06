@@ -9,7 +9,7 @@ fn replay(c: &mut Criterion) {
     g.sample_size(10);
     g.bench_function("v1_btreemap", |b| {
         b.iter(|| {
-            let mut book = OrderBook::with_capacity(1 << 20);
+            let mut book = OrderBook::with_capacity(1 << 14);
             for cmd in &cmds {
                 black_box(book.apply(*cmd));
             }
