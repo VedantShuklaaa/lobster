@@ -240,3 +240,28 @@ fn modify_rejects_unknown_and_zero() {
         }]
     );
 }
+
+#[test]
+fn cancel_middle_of_level_keeps_links_intact() {
+    let mut book = OrderBook::new();
+    book.apply(add(1, Side::Ask, 100, 5));
+    book.apply(add(2, Side::Ask, 100, 5));
+    book.apply(add(3, Side::Ask, 100, 5));
+    book.apply(Command::Cancel(2));
+    let ev = book.apply(add(4, Side::Bid, 100, 10));
+    assert_eq!(ev, vec![fill(1, 4, 100, 5), fill(3, 4, 100, 5)]);
+}
+
+#[test]
+fn slots_are_reused_after_cancel_and_fill() {
+    let mut book = OrderBook::new();
+    for round in 0..100u64 {
+        let b = round * 10;
+        book.apply(add(b + 1, Side::Ask, 100, 5));
+        book.apply(add(b + 2, Side::Ask, 100, 5));
+        book.apply(Command::Cancel(b + 1));
+        let ev = book.apply(add(b + 3, Side::Bid, 100, 5));
+        assert_eq!(ev, vec![fill(b + 2, b + 3, 100, 5)]);
+        assert_eq!(book.best_ask(), None);
+    }
+}

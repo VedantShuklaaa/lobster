@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{Command, Event, Fill, Order, OrderId, Price, Qty, RejectReason, Side};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -27,16 +27,88 @@ impl Hasher for FxHasher {
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
-#[derive(Default)]
+const NIL: u32 = u32::MAX;
+
+#[derive(Clone, Copy)]
+struct Node {
+    order: Order,
+    prev: u32,
+    next: u32, // also links the free list
+}
+
+#[derive(Clone, Copy)]
+struct Level {
+    head: u32,
+    tail: u32,
+}
+
+struct Slab {
+    nodes: Vec<Node>,
+    free: u32,
+}
+
+impl Slab {
+    fn alloc(&mut self, order: Order) -> u32 {
+        let node = Node {
+            order,
+            prev: NIL,
+            next: NIL,
+        };
+        if self.free != NIL {
+            let s = self.free;
+            self.free = self.nodes[s as usize].next;
+            self.nodes[s as usize] = node;
+            s
+        } else {
+            self.nodes.push(node);
+            (self.nodes.len() - 1) as u32
+        }
+    }
+
+    fn release(&mut self, s: u32) {
+        self.nodes[s as usize].next = self.free;
+        self.free = s;
+    }
+
+    fn push_back(&mut self, level: &mut Level, s: u32) {
+        let tail = level.tail;
+        self.nodes[s as usize].prev = tail;
+        self.nodes[s as usize].next = NIL;
+        if tail == NIL {
+            level.head = s;
+        } else {
+            self.nodes[tail as usize].next = s;
+        }
+        level.tail = s;
+    }
+
+    /// Detach from its level. Does not free the slot.
+    fn unlink(&mut self, level: &mut Level, s: u32) {
+        let Node { prev, next, .. } = self.nodes[s as usize];
+        if prev == NIL {
+            level.head = next;
+        } else {
+            self.nodes[prev as usize].next = next;
+        }
+        if next == NIL {
+            level.tail = prev;
+        } else {
+            self.nodes[next as usize].prev = prev;
+        }
+    }
+}
+
 pub struct OrderBook {
-    /// Bids: best = highest price  -> bids.iter().next_back()
-    bids: BTreeMap<Price, VecDeque<Order>>,
+    bids: BTreeMap<Price, Level>,
+    asks: BTreeMap<Price, Level>,
+    slab: Slab,
+    index: FastMap<OrderId, u32>,
+}
 
-    /// Asks: best = lowest price   -> asks.iter().next()
-    asks: BTreeMap<Price, VecDeque<Order>>,
-
-    /// Where each resting order lives, for cancel/modify.
-    index: FastMap<OrderId, (Side, Price)>,
+impl Default for OrderBook {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl OrderBook {
@@ -44,12 +116,26 @@ impl OrderBook {
         Self::default()
     }
 
+    pub fn with_capacity(orders: usize) -> Self {
+        let mut index = FastMap::default();
+        index.reserve(orders);
+        Self {
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            slab: Slab {
+                nodes: Vec::with_capacity(orders),
+                free: NIL,
+            },
+            index,
+        }
+    }
+
     pub fn best_bid(&self) -> Option<Price> {
-        self.bids.last_key_value().map(|(price, _)| *price)
+        self.bids.last_key_value().map(|(p, _)| *p)
     }
 
     pub fn best_ask(&self) -> Option<Price> {
-        self.asks.first_key_value().map(|(price, _)| *price)
+        self.asks.first_key_value().map(|(p, _)| *p)
     }
 
     pub fn live_orders(&self) -> usize {
@@ -63,132 +149,6 @@ impl OrderBook {
             Command::Cancel(id) => self.cancel(id),
             Command::Modify { id, new_qty } => self.modify(id, new_qty),
         }
-    }
-
-    fn add_limit(&mut self, mut order: Order) -> Vec<Event> {
-        let mut events = Vec::new();
-
-        if order.qty == 0 {
-            events.push(Event::Rejected {
-                id: order.id,
-                reason: RejectReason::InvalidQty,
-            });
-            return events;
-        }
-        if self.index.contains_key(&order.id) {
-            events.push(Event::Rejected {
-                id: order.id,
-                reason: RejectReason::DuplicateId,
-            });
-            return events;
-        }
-
-        order.qty = self.match_order(
-            order.id,
-            order.side,
-            Some(order.price),
-            order.qty,
-            &mut events,
-        );
-
-        if order.qty > 0 {
-            let side_book = match order.side {
-                Side::Bid => &mut self.bids,
-                Side::Ask => &mut self.asks,
-            };
-            side_book.entry(order.price).or_default().push_back(order);
-            self.index.insert(order.id, (order.side, order.price));
-        }
-        events
-    }
-
-    fn market(&mut self, id: OrderId, side: Side, qty: u32) -> Vec<Event> {
-        let mut events = Vec::new();
-
-        if qty == 0 {
-            events.push(Event::Rejected {
-                id,
-                reason: RejectReason::InvalidQty,
-            });
-            return events;
-        }
-
-        self.match_order(id, side, None, qty, &mut events);
-
-        // remainder is dropped; nothing filled at all -> reject
-        if events.is_empty() {
-            events.push(Event::Rejected {
-                id,
-                reason: RejectReason::NoLiquidity,
-            });
-        }
-        events
-    }
-
-    fn cancel(&mut self, id: OrderId) -> Vec<Event> {
-        let Some((side, price)) = self.index.remove(&id) else {
-            return vec![Event::Rejected {
-                id,
-                reason: RejectReason::UnknownOrder,
-            }];
-        };
-
-        let book = match side {
-            Side::Bid => &mut self.bids,
-            Side::Ask => &mut self.asks,
-        };
-
-        if let Some(level) = book.get_mut(&price) {
-            if let Some(pos) = level.iter().position(|o| o.id == id) {
-                level.remove(pos);
-            }
-
-            if level.is_empty() {
-                book.remove(&price);
-            }
-        }
-        Vec::new()
-    }
-
-    fn modify(&mut self, id: OrderId, new_qty: Qty) -> Vec<Event> {
-        if new_qty == 0 {
-            return vec![Event::Rejected {
-                id,
-                reason: RejectReason::InvalidQty,
-            }];
-        }
-        let Some(&(side, price)) = self.index.get(&id) else {
-            return vec![Event::Rejected {
-                id,
-                reason: RejectReason::UnknownOrder,
-            }];
-        };
-
-        let book = match side {
-            Side::Bid => &mut self.bids,
-            Side::Ask => &mut self.asks,
-        };
-        let level = book.get_mut(&price).unwrap();
-        let pos = level.iter().position(|o| o.id == id).unwrap();
-
-        if new_qty <= level[pos].qty {
-            level[pos].qty = new_qty;
-        } else {
-            let mut order = level.remove(pos).unwrap();
-            order.qty = new_qty;
-            level.push_back(order);
-        }
-
-        Vec::new()
-    }
-
-    pub fn qty_at(&self, side: Side, price: Price) -> Qty {
-        let book = match side {
-            Side::Bid => &self.bids,
-            Side::Ask => &self.asks,
-        };
-        book.get(&price)
-            .map_or(0, |level| level.iter().map(|o| o.qty).sum())
     }
 
     fn match_order(
@@ -222,49 +182,185 @@ impl OrderBook {
             };
             let level = opp.get_mut(&best_price).unwrap();
 
-            while qty > 0 {
-                let Some(maker) = level.front_mut() else {
-                    break;
-                };
-                let traded = qty.min(maker.qty);
+            while qty > 0 && level.head != NIL {
+                let s = level.head;
+                let node = &mut self.slab.nodes[s as usize];
+                let traded = qty.min(node.order.qty);
 
                 events.push(Event::Fill(Fill {
-                    maker: maker.id,
+                    maker: node.order.id,
                     taker: id,
                     price: best_price,
                     qty: traded,
                 }));
 
                 qty -= traded;
-                maker.qty -= traded;
+                node.order.qty -= traded;
 
-                if maker.qty == 0 {
-                    let maker_id = maker.id;
-                    level.pop_front();
+                if node.order.qty == 0 {
+                    let maker_id = node.order.id;
+                    self.slab.unlink(level, s);
+                    self.slab.release(s);
                     self.index.remove(&maker_id);
                 }
             }
 
-            if level.is_empty() {
+            if level.head == NIL {
                 opp.remove(&best_price);
             }
         }
         qty
     }
 
-    pub fn total_qty(&self) -> u64 {
-        self.bids
-            .values()
-            .chain(self.asks.values())
-            .flat_map(|l| l.iter())
-            .map(|o| o.qty as u64)
-            .sum()
+    fn add_limit(&mut self, mut order: Order) -> Vec<Event> {
+        let mut events = Vec::new();
+
+        if order.qty == 0 {
+            events.push(Event::Rejected {
+                id: order.id,
+                reason: RejectReason::InvalidQty,
+            });
+            return events;
+        }
+        if self.index.contains_key(&order.id) {
+            events.push(Event::Rejected {
+                id: order.id,
+                reason: RejectReason::DuplicateId,
+            });
+            return events;
+        }
+
+        order.qty = self.match_order(
+            order.id,
+            order.side,
+            Some(order.price),
+            order.qty,
+            &mut events,
+        );
+
+        if order.qty > 0 {
+            let s = self.slab.alloc(order);
+            let book = match order.side {
+                Side::Bid => &mut self.bids,
+                Side::Ask => &mut self.asks,
+            };
+            let level = book.entry(order.price).or_insert(Level {
+                head: NIL,
+                tail: NIL,
+            });
+            self.slab.push_back(level, s);
+            self.index.insert(order.id, s);
+        }
+        events
     }
 
-    pub fn with_capacity(orders: usize) -> Self {
-        let mut b = Self::default();
-        b.index.reserve(orders);
-        b
+    fn market(&mut self, id: OrderId, side: Side, qty: Qty) -> Vec<Event> {
+        let mut events = Vec::new();
+
+        if qty == 0 {
+            events.push(Event::Rejected {
+                id,
+                reason: RejectReason::InvalidQty,
+            });
+            return events;
+        }
+
+        self.match_order(id, side, None, qty, &mut events);
+
+        if events.is_empty() {
+            events.push(Event::Rejected {
+                id,
+                reason: RejectReason::NoLiquidity,
+            });
+        }
+        events
+    }
+
+    fn cancel(&mut self, id: OrderId) -> Vec<Event> {
+        let Some(s) = self.index.remove(&id) else {
+            return vec![Event::Rejected {
+                id,
+                reason: RejectReason::UnknownOrder,
+            }];
+        };
+
+        let Order { side, price, .. } = self.slab.nodes[s as usize].order;
+        let book = match side {
+            Side::Bid => &mut self.bids,
+            Side::Ask => &mut self.asks,
+        };
+        let level = book.get_mut(&price).unwrap();
+        self.slab.unlink(level, s);
+        self.slab.release(s);
+        if level.head == NIL {
+            book.remove(&price);
+        }
+        Vec::new()
+    }
+
+    fn modify(&mut self, id: OrderId, new_qty: Qty) -> Vec<Event> {
+        if new_qty == 0 {
+            return vec![Event::Rejected {
+                id,
+                reason: RejectReason::InvalidQty,
+            }];
+        }
+        let Some(&s) = self.index.get(&id) else {
+            return vec![Event::Rejected {
+                id,
+                reason: RejectReason::UnknownOrder,
+            }];
+        };
+
+        let node = &mut self.slab.nodes[s as usize];
+        if new_qty <= node.order.qty {
+            node.order.qty = new_qty; // decrease keeps queue position
+            return Vec::new();
+        }
+
+        // increase: lose priority, move to the back of the level
+        node.order.qty = new_qty;
+        let Order { side, price, .. } = node.order;
+        let book = match side {
+            Side::Bid => &mut self.bids,
+            Side::Ask => &mut self.asks,
+        };
+        let level = book.get_mut(&price).unwrap();
+        self.slab.unlink(level, s);
+        self.slab.push_back(level, s);
+        Vec::new()
+    }
+
+    // ---- test/debug helpers ----
+
+    fn walk(&self, level: Level, mut f: impl FnMut(&Order)) {
+        let mut s = level.head;
+        while s != NIL {
+            let n = &self.slab.nodes[s as usize];
+            f(&n.order);
+            s = n.next;
+        }
+    }
+
+    pub fn qty_at(&self, side: Side, price: Price) -> Qty {
+        let book = match side {
+            Side::Bid => &self.bids,
+            Side::Ask => &self.asks,
+        };
+        let Some(&level) = book.get(&price) else {
+            return 0;
+        };
+        let mut sum = 0;
+        self.walk(level, |o| sum += o.qty);
+        sum
+    }
+
+    pub fn total_qty(&self) -> u64 {
+        let mut sum = 0u64;
+        for level in self.bids.values().chain(self.asks.values()) {
+            self.walk(*level, |o| sum += o.qty as u64);
+        }
+        sum
     }
 
     #[doc(hidden)]
@@ -275,18 +371,23 @@ impl OrderBook {
         let mut count = 0;
         for (side, book) in [(Side::Bid, &self.bids), (Side::Ask, &self.asks)] {
             for (price, level) in book {
-                assert!(!level.is_empty(), "empty level at {price}");
-                for o in level {
-                    assert_eq!(o.side, side);
-                    assert_eq!(o.price, *price);
-                    assert!(o.qty > 0, "zero-qty resting order {}", o.id);
-                    assert_eq!(
-                        self.index.get(&o.id),
-                        Some(&(side, *price)),
-                        "index mismatch"
-                    );
+                assert!(
+                    level.head != NIL && level.tail != NIL,
+                    "empty level at {price}"
+                );
+                let (mut s, mut prev) = (level.head, NIL);
+                while s != NIL {
+                    let n = &self.slab.nodes[s as usize];
+                    assert_eq!(n.prev, prev, "broken prev link");
+                    assert_eq!(n.order.side, side);
+                    assert_eq!(n.order.price, *price);
+                    assert!(n.order.qty > 0, "zero-qty resting order {}", n.order.id);
+                    assert_eq!(self.index.get(&n.order.id), Some(&s), "index mismatch");
                     count += 1;
+                    prev = s;
+                    s = n.next;
                 }
+                assert_eq!(prev, level.tail, "tail mismatch");
             }
         }
         assert_eq!(count, self.index.len(), "index has orphan entries");

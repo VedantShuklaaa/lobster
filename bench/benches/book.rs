@@ -7,7 +7,7 @@ fn replay(c: &mut Criterion) {
     let mut g = c.benchmark_group("replay");
     g.throughput(Throughput::Elements(cmds.len() as u64));
     g.sample_size(10);
-    g.bench_function("v1_btreemap", |b| {
+    g.bench_function("v2_slab", |b| {
         b.iter(|| {
             let mut book = OrderBook::with_capacity(1 << 14);
             for cmd in &cmds {
