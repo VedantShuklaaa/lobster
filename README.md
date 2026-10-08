@@ -2,7 +2,7 @@
 
 A limit order book matching engine in Rust, built to explore low-latency systems design: cache-friendly data structures, allocation-free hot paths, and honest measurement.
 
-> Status: v4 (array-indexed price levels) done, 98.7 M ops/s on the synthetic replay. Wide-book stress test and dense id index next.
+> Status: v5 (occupancy bitmap for best-price advance) done. Wide and sparse stress workloads added. Dense id index next.
 
 ## What is an order book?
 
@@ -68,15 +68,14 @@ lobster/
 ### Data model (v4)
 
 ```
-bids/asks: Ladder { levels: Vec<Level>, best, active }
+bids/asks: Ladder { levels: Vec<Level>, occ: Occupancy, best, active }
            Level = { head, tail }       slot indices, array indexed by price
-slab:      Vec<Node>                    Node = { order, prev, next }, free list for reuse
-index:     FastMap<OrderId, slot>       Fx-hashed, sized to the workload
+           Occupancy = two-level bitmap (1 bit per price, 1 summary bit per 64 prices)
 ```
 
-Resting orders live in one slab; each price level is an intrusive doubly linked list of slab slots, so cancel is O(1) (look up the slot, unlink, push it on the free list). Price lookup is a direct array index with no tree walk. The best price is cached per side and, when its level empties, advances by scanning toward worse prices; a count of non-empty levels guarantees the scan terminates. Prices and quantities are integers (`u32` ticks and lots), never floats.
+The best price is cached per side. When its level empties, the next best price is found with the occupancy bitmap: a `trailing_zeros` / `leading_zeros` on the current word, then on the summary word, then on the target word (at most three word scans, regardless of how sparse the book is).
 
-Tradeoffs: prices must be below the configured level count (default 65,536 ticks, otherwise `Rejected(PriceOutOfRange)`), the ladders cost about 1 MB per book, and a sparse book makes the best-price scan longer.
+Tradeoffs: prices must be below the configured level count (default 65,536 ticks, otherwise `Rejected(PriceOutOfRange)`), and the ladders cost about 1 MB per book plus about 8 KB of bitmap per side.
 
 ## Order semantics
 
@@ -117,6 +116,20 @@ cargo bench -p bench                            # replay throughput (criterion)
 cargo run --release -p bench --bin latency auto # per-op percentiles
 ```
 
+### Stress workloads
+
+The default workload keeps orders within about 20 ticks of the mid, which is the best case for an array-indexed ladder. Two presets stress the other end (same seed, same 1M commands, same 65,536-tick ladder):
+
+| Preset | Resting orders | Price range | Purpose |
+|---|---|---|---|
+| narrow | ~5-9k | ~1.2k ticks | original workload |
+| wide | ~19k | ~61k ticks | footprint stress: whole ladder touched |
+| sparse | ~70 | ~61k ticks | scan stress: long empty gaps between levels |
+
+`cargo run --release -p bench --bin stress -- <label> 15` prints workload shape (deterministic), throughput, and a worst-case scan row.
+
+Finding for v4: sparse ran at 0.57x of narrow, and the scan alone explains it. The worst-case row measures 0.24 ns per empty level; the sparse workload scans 35.8 levels per command on average, which predicts 8.6 ns per command, against a measured gap of 8.3 ns. Wide lost 0.68x, of which the scan explains only ~1.4 of 5.1 ns; the rest is likely cache/TLB and a different op mix (not isolated).
+
 ### Results
 
 Machine: Apple M5 MacBook Air, 16 GB RAM, macOS, plugged in, nothing else running.
@@ -132,6 +145,15 @@ Machine: Apple M5 MacBook Air, 16 GB RAM, macOS, plugged in, nothing else runnin
 \* Latency percentiles are quantized to about 42 ns (the `Instant` tick on Apple Silicon is 24 MHz), so p50/p90 are not meaningful per-op numbers and single-tick differences are noise. From v3 on, the percentiles sit at or near the timer floor; only throughput and the max (OS jitter) carry information.
 
 Throughput is criterion's median over 10 samples; mean/op is 1 / throughput. Percentiles are per call with timer overhead subtracted. Workload: 1,000,000 commands, seed 42.
+
+### Stress workloads (M5, `stress` bin, 15 runs, median, M ops/s)
+
+| Version | narrow | wide | sparse | worst-case scan (64k-level gap) |
+|---|---|---|---|---|
+| v4: array-indexed levels | 93.2 | 63.1 | 52.7 | 15.3 µs |
+| v5: + occupancy bitmap | 89.8 | 68.4 | 93.2 | 0.01 µs |
+
+v4 was scan-bound on sparse books: the worst-case row measured 0.24 ns per empty level, which predicted the 8.3 ns/op sparse penalty to within 0.3 ns. The bitmap removed it, and the model also predicted the gain on wide, where the scan is a smaller share. The remaining wide gap (0.76x of narrow) is not scan; likely cache/TLB footprint and op mix, not yet isolated.
 
 ### What the profiles showed
 
@@ -149,7 +171,7 @@ Pre-sizing the id index to 1M entries. Peak live orders in this workload is abou
 
 ### Known limits
 
-* The synthetic workload keeps orders in a narrow band near the mid price, which is the best case for an array-indexed ladder (hot cache, short best-price scans). A wide, sparse book is the stress case; results to be added.
+* Narrow, wide and sparse workloads are all synthetic; the wide book has a large hole around the mid (uniform offsets), which real books don't.
 * Prices must fit the configured ladder size.
 * Single instrument, single thread, no persistence or networking.
 * Percentiles are at the timer floor; per-operation-type latency needs batched timing.
@@ -168,7 +190,8 @@ Pre-sizing the id index to 1M entries. Peak live orders in this workload is abou
 * \[x] v2: slab-allocated orders, intrusive level lists (O(1) cancel)
 * \[x] v3: caller-provided event buffer (no allocation on the hot path)
 * \[x] v4: array-indexed price levels
-* \[ ] Wide/sparse-book workload (stress case) and comparison against v3
+* \[x] Wide/sparse-book workload (stress case) and comparison against v3
+* \[x] v5: occupancy bitmap for best-price advance
 * \[ ] Dense id index (slab handle) instead of a hash map
 * \[ ] Per-operation-type latency breakdown (batched timing, to get under the 42 ns tick)
 * \[ ] `Cancelled { id }` event for successful cancels

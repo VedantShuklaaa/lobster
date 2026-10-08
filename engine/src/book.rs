@@ -28,7 +28,6 @@ impl Hasher for FxHasher {
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 const NIL: u32 = u32::MAX;
-/// Default number of price ticks per side. Prices must be below this.
 const DEFAULT_LEVELS: usize = 1 << 16;
 
 #[derive(Clone, Copy)]
@@ -105,10 +104,99 @@ impl Slab {
     }
 }
 
+/// Two-level occupancy bitmap over price levels.
+///
+/// Bit `p` of `bits` is set iff level `p` is non-empty. Bit `w` of `summary` is set iff
+/// `bits[w] != 0`. Finding the next occupied level is then at most three word scans
+/// (bits, summary, bits) instead of walking up to 64k empty levels.
+struct Occupancy {
+    bits: Vec<u64>,
+    summary: Vec<u64>,
+}
+
+impl Occupancy {
+    fn new(levels: usize) -> Self {
+        let words = levels.div_ceil(64);
+        Self {
+            bits: vec![0; words],
+            summary: vec![0; words.div_ceil(64)],
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, p: usize) {
+        let w = p >> 6;
+        self.bits[w] |= 1 << (p & 63);
+        self.summary[w >> 6] |= 1 << (w & 63);
+    }
+
+    #[inline]
+    fn clear(&mut self, p: usize) {
+        let w = p >> 6;
+        self.bits[w] &= !(1 << (p & 63));
+        if self.bits[w] == 0 {
+            self.summary[w >> 6] &= !(1 << (w & 63));
+        }
+    }
+
+    #[inline]
+    fn contains(&self, p: usize) -> bool {
+        self.bits[p >> 6] >> (p & 63) & 1 == 1
+    }
+
+    /// Smallest occupied level strictly above `p`.
+    #[inline]
+    fn next_above(&self, p: usize) -> Option<usize> {
+        let w = p >> 6;
+        // two shifts: a single `<< (b + 1)` would overflow when b == 63
+        let m = self.bits[w] & (!0u64 << (p & 63) << 1);
+        if m != 0 {
+            return Some((w << 6) | m.trailing_zeros() as usize);
+        }
+        let mut sw = w >> 6;
+        let mut sm = self.summary[sw] & (!0u64 << (w & 63) << 1);
+        loop {
+            if sm != 0 {
+                let w2 = (sw << 6) | sm.trailing_zeros() as usize;
+                return Some((w2 << 6) | self.bits[w2].trailing_zeros() as usize);
+            }
+            sw += 1;
+            if sw == self.summary.len() {
+                return None;
+            }
+            sm = self.summary[sw];
+        }
+    }
+
+    /// Largest occupied level strictly below `p`.
+    #[inline]
+    fn prev_below(&self, p: usize) -> Option<usize> {
+        let w = p >> 6;
+        let m = self.bits[w] & ((1u64 << (p & 63)) - 1);
+        if m != 0 {
+            return Some((w << 6) | (63 - m.leading_zeros() as usize));
+        }
+        let mut sw = w >> 6;
+        let mut sm = self.summary[sw] & ((1u64 << (w & 63)) - 1);
+        loop {
+            if sm != 0 {
+                let w2 = (sw << 6) | (63 - sm.leading_zeros() as usize);
+                return Some((w2 << 6) | (63 - self.bits[w2].leading_zeros() as usize));
+            }
+            if sw == 0 {
+                return None;
+            }
+            sw -= 1;
+            sm = self.summary[sw];
+        }
+    }
+}
+
 /// One side of the book: a direct-indexed array of price levels.
 struct Ladder {
     levels: Vec<Level>,
-    /// Best price with resting orders (highest for bids, lowest for asks).
+    /// Which levels are non-empty, for O(1)-ish best-price advance.
+    occ: Occupancy,
     best: Option<Price>,
     /// Number of non-empty levels.
     active: u32,
@@ -119,6 +207,7 @@ impl Ladder {
     fn new(n: usize, is_bid: bool) -> Self {
         Self {
             levels: vec![EMPTY; n],
+            occ: Occupancy::new(n),
             best: None,
             active: 0,
             is_bid,
@@ -130,6 +219,7 @@ impl Ladder {
         let was_empty = level.head == NIL;
         slab.push_back(level, slot);
         if was_empty {
+            self.occ.set(price as usize);
             self.active += 1;
             self.best = Some(match self.best {
                 None => price,
@@ -148,23 +238,18 @@ impl Ladder {
     }
 
     fn level_emptied(&mut self, price: Price) {
+        self.occ.clear(price as usize);
         self.active -= 1;
         if self.active == 0 {
             self.best = None;
         } else if self.best == Some(price) {
-            // every other non-empty level is at a worse price, so this terminates
-            let mut p = price as usize;
-            loop {
-                if self.is_bid {
-                    p -= 1;
-                } else {
-                    p += 1;
-                }
-                if self.levels[p].head != NIL {
-                    break;
-                }
-            }
-            self.best = Some(p as Price);
+            // every other non-empty level is at a worse price, so one exists
+            let next = if self.is_bid {
+                self.occ.prev_below(price as usize)
+            } else {
+                self.occ.next_above(price as usize)
+            };
+            self.best = Some(next.expect("active > 0 but no occupied level") as Price);
         }
     }
 }
@@ -445,6 +530,13 @@ impl OrderBook {
             let mut best: Option<Price> = None;
             for (p, level) in ladder.levels.iter().enumerate() {
                 let price = p as Price;
+
+                assert_eq!(
+                    ladder.occ.contains(p),
+                    level.head != NIL,
+                    "occupancy bit mismatch at {price}"
+                );
+
                 if level.head == NIL {
                     assert_eq!(level.tail, NIL, "half-empty level at {price}");
                     continue;
@@ -469,9 +561,95 @@ impl OrderBook {
                 }
                 assert_eq!(prev, level.tail, "tail mismatch");
             }
+
+            for (w, &word) in ladder.occ.bits.iter().enumerate() {
+                let summary_bit = ladder.occ.summary[w >> 6] >> (w & 63) & 1 == 1;
+                assert_eq!(summary_bit, word != 0, "summary bit mismatch at word {w}");
+            }
+
             assert_eq!(active, ladder.active, "active level count mismatch");
             assert_eq!(best, ladder.best, "cached best price mismatch");
         }
         assert_eq!(count, self.index.len(), "index has orphan entries");
+    }
+}
+
+#[cfg(test)]
+mod occupancy_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// Random set/clear against a BTreeSet; every query must agree. Sizes include
+    /// non-multiples of 64 and ones that straddle summary-word boundaries.
+    #[test]
+    fn bitmap_matches_btreeset() {
+        for &n in &[1usize, 63, 64, 65, 1000, 4096, 4097, 65_536] {
+            let mut occ = Occupancy::new(n);
+            let mut reference = BTreeSet::new();
+            let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ n as u64);
+            for step in 0..20_000 {
+                let p = rng.below(n);
+                // alternate dense and sparse phases
+                let sparse = (step / 2_000) % 2 == 1;
+                if reference.contains(&p) || (sparse && rng.below(4) != 0) {
+                    occ.clear(p);
+                    reference.remove(&p);
+                } else {
+                    occ.set(p);
+                    reference.insert(p);
+                }
+                let q = rng.below(n);
+                assert_eq!(occ.contains(q), reference.contains(&q));
+                assert_eq!(occ.next_above(q), reference.range(q + 1..).next().copied(), "n={n} q={q}");
+                assert_eq!(occ.prev_below(q), reference.range(..q).next_back().copied(), "n={n} q={q}");
+            }
+        }
+    }
+
+    /// Random commands on a tiny ladder (lots of level churn and boundary prices),
+    /// full invariant check after every command.
+    #[test]
+    fn random_commands_keep_invariants() {
+        let levels = 300;
+        let mut book = OrderBook::with_config(64, levels);
+        let mut rng = Rng(0xDEAD_BEEF_CAFE_F00D);
+        let mut out = Vec::new();
+        let mut next_id = 1u64;
+        for _ in 0..30_000 {
+            let r = rng.below(100);
+            let cmd = if r < 45 {
+                // ids may already be gone: exercises UnknownOrder
+                Command::Cancel(1 + rng.below(next_id as usize + 1) as u64)
+            } else if r < 50 {
+                Command::Market { id: { next_id += 1; next_id }, side: if rng.below(2) == 0 { Side::Bid } else { Side::Ask }, qty: 1 + rng.below(50) as u32 }
+            } else if r < 55 {
+                Command::Modify { id: 1 + rng.below(next_id as usize + 1) as u64, new_qty: 1 + rng.below(100) as u32 }
+            } else {
+                next_id += 1;
+                Command::Add(Order {
+                    id: next_id,
+                    side: if rng.below(2) == 0 { Side::Bid } else { Side::Ask },
+                    // includes 0, 63/64 boundaries and the top levels
+                    price: rng.below(levels + 5) as Price,
+                    qty: 1 + rng.below(100) as u32,
+                })
+            };
+            out.clear();
+            book.apply_into(cmd, &mut out);
+            book.check_invariants();
+        }
     }
 }
