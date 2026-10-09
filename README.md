@@ -141,6 +141,7 @@ Machine: Apple M5 MacBook Air, 16 GB RAM, macOS, plugged in, nothing else runnin
 | v2: slab + intrusive level lists (O(1) cancel) | 32.5 M ops/s | ~31 ns | 11 ns\* | 12 ns\* | 54 ns | 137 ns | 14.7 µs |
 | v3: caller-provided event buffer (no hot-path allocation) | 48.0 M ops/s | ~21 ns | <1 tick\* | 12 ns\* | 53 ns | 95 ns | 14-17 µs |
 | v4: array-indexed price levels | 98.7 M ops/s | ~10 ns | <1 tick\* | 1 tick\* | 1 tick\* | 1 tick\* | 13.6-17.8 µs |
+| v5: occupancy bitmap | ~96.5 M ops/s | ~10 ns | <1 tick\* | 1 tick\* | 1 tick\* | 2 ticks\* | ~16 µs |
 
 \* Latency percentiles are quantized to about 42 ns (the `Instant` tick on Apple Silicon is 24 MHz), so p50/p90 are not meaningful per-op numbers and single-tick differences are noise. From v3 on, the percentiles sit at or near the timer floor; only throughput and the max (OS jitter) carry information.
 
@@ -167,7 +168,7 @@ Lesson: a function-level profile hides inlined callees. Forcing the suspects int
 
 ### Tried and rejected
 
-Pre-sizing the id index to 1M entries. Peak live orders in this workload is about 8.6k, so the oversized table caused cache/TLB misses: p99.9 rose from about 180 ns to 700-1000 ns. Sized to about 2x peak, it stays hot in cache.
+Flat open-addressing id table (linear probing, backward-shift deletion), with and without a 1-byte tag array, instead of HashMap + Fx. M5, 3 alternating runs each: narrow −6% / −8%, wide within noise, sparse +10% / +6%. Narrow is 77% ghost cancels, and the tag array was meant to make that miss path cheap, but it made narrow worse, so the cause is unexplained (code layout is possible). Not adopted.
 
 ### Known limits
 
@@ -175,6 +176,7 @@ Pre-sizing the id index to 1M entries. Peak live orders in this workload is abou
 * Prices must fit the configured ladder size.
 * Single instrument, single thread, no persistence or networking.
 * Percentiles are at the timer floor; per-operation-type latency needs batched timing.
+* The generated stream draws command types i.i.d. (50/45/5), so ~55% of neighbouring commands differ in type. On M5 that costs ~2.5 ns/command (~25% of per-op time) in branch mispredicts alone (bench --bin dispatch); real feeds are burstier.
 
 ### Remaining costs
 
