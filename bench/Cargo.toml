@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 engine = { path = "../engine" }
 generator = { path = "../generator" }
+pipeline = { path = "../pipeline" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

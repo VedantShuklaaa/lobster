@@ -1,0 +1,10 @@
+[package]
+name = "pipeline"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+engine = { path = "../engine" }
+
+[dev-dependencies]
+generator = { path = "../generator" }
