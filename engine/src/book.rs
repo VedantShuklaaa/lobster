@@ -613,8 +613,16 @@ mod occupancy_tests {
                 }
                 let q = rng.below(n);
                 assert_eq!(occ.contains(q), reference.contains(&q));
-                assert_eq!(occ.next_above(q), reference.range(q + 1..).next().copied(), "n={n} q={q}");
-                assert_eq!(occ.prev_below(q), reference.range(..q).next_back().copied(), "n={n} q={q}");
+                assert_eq!(
+                    occ.next_above(q),
+                    reference.range(q + 1..).next().copied(),
+                    "n={n} q={q}"
+                );
+                assert_eq!(
+                    occ.prev_below(q),
+                    reference.range(..q).next_back().copied(),
+                    "n={n} q={q}"
+                );
             }
         }
     }
@@ -634,14 +642,32 @@ mod occupancy_tests {
                 // ids may already be gone: exercises UnknownOrder
                 Command::Cancel(1 + rng.below(next_id as usize + 1) as u64)
             } else if r < 50 {
-                Command::Market { id: { next_id += 1; next_id }, side: if rng.below(2) == 0 { Side::Bid } else { Side::Ask }, qty: 1 + rng.below(50) as u32 }
+                Command::Market {
+                    id: {
+                        next_id += 1;
+                        next_id
+                    },
+                    side: if rng.below(2) == 0 {
+                        Side::Bid
+                    } else {
+                        Side::Ask
+                    },
+                    qty: 1 + rng.below(50) as u32,
+                }
             } else if r < 55 {
-                Command::Modify { id: 1 + rng.below(next_id as usize + 1) as u64, new_qty: 1 + rng.below(100) as u32 }
+                Command::Modify {
+                    id: 1 + rng.below(next_id as usize + 1) as u64,
+                    new_qty: 1 + rng.below(100) as u32,
+                }
             } else {
                 next_id += 1;
                 Command::Add(Order {
                     id: next_id,
-                    side: if rng.below(2) == 0 { Side::Bid } else { Side::Ask },
+                    side: if rng.below(2) == 0 {
+                        Side::Bid
+                    } else {
+                        Side::Ask
+                    },
                     // includes 0, 63/64 boundaries and the top levels
                     price: rng.below(levels + 5) as Price,
                     qty: 1 + rng.below(100) as u32,

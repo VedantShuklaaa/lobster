@@ -1,5 +1,7 @@
 # lobster
 
+[![CI](https://github.com/VedantShuklaaa/lobster/actions/workflows/ci.yml/badge.svg)](https://github.com/VedantShuklaaa/lobster/actions/workflows/ci.yml)
+
 A limit order book matching engine in Rust, built to explore low-latency systems design: cache-friendly data structures, allocation-free hot paths, and honest measurement.
 
 > Status: v5 (occupancy bitmap for best-price advance) done. Stress workloads (narrow / wide / sparse / bursty) and a dispatch microbenchmark added.
@@ -127,6 +129,17 @@ cargo run --release -p bench --bin latency auto       # per-op percentiles
 cargo run --release -p bench --bin stress -- v5 15    # workload shapes + throughput (15 runs)
 cargo run --release -p bench --bin dispatch -- 30     # dispatch microbench (30 passes)
 ```
+
+### Environments
+
+Every number in this README so far was measured on one machine:
+
+| Environment | Used for | Notes |
+|---|---|---|
+| Apple M5 MacBook Air, macOS | all results in this README | no hard core pinning on Apple Silicon (QoS hints only); the `Instant` tick is about 42 ns |
+| AWS EC2, Linux (planned, roadmap B and C) | pinned-core and under-load latency, the live demo | free-tier instances are burstable and shared, so benchmark runs will use a separate on-demand instance that is terminated afterwards |
+
+Results from different environments are never compared in one table. Each Linux result will record the instance type, CPU model, kernel version, and whether threads were pinned. CI runs on GitHub-hosted runners and checks correctness only; its timings are not used.
 
 ### Stress workloads
 
@@ -261,11 +274,21 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 * \[x] Dispatch microbench: branch mispredicts are about 2.5 ns of `apply_into`'s per-command cost
 * \[x] Flat id table, with and without tags: tried and rejected
 * \[x] Bursty stream preset: 1.31x narrow, about three quarters of the gap is branch prediction
+
+### Next, in this order
+
+* \[ ] **A. CI**: `fmt`, `clippy`, and tests (debug and release) on every push and PR (GitHub Actions)
+* \[ ] **B. Linux environment**: AWS EC2 instance, and CD from `main` (build in Actions, deploy, restart the service)
+* \[ ] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux)
+* \[ ] **D. Static benchmarks page** (Vercel), reading a results JSON written by a manually triggered benchmark workflow
+* \[ ] **E. Live demo**: Rust WebSocket server around the engine, with an order book UI
+
+### Later (unordered)
+
 * \[ ] Engine-assigned handles (slot + generation) instead of a hash map
 * \[ ] Per-operation-type latency breakdown (batched timing, to get under the 42 ns tick)
 * \[ ] `Cancelled { id }` event for successful cancels
 * \[ ] Replay of real market data (L2/L3) instead of synthetic only
-* \[ ] Engine thread behind an SPSC ring, with pinned-core end-to-end latency percentiles under load
 
 ### Planned experiment: tiered regional books
 

@@ -4,7 +4,6 @@ pub use types::*;
 pub mod book;
 pub use book::*;
 
-
 // Design decisions
 //
 // Cancel/Modify of an unknown id:

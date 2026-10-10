@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# the workflow only reads the repo
+permissions:
+  contents: read
+
+# a newer push to the same branch cancels the run still in progress
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # caches ~/.cargo and target/ between runs, keyed on Cargo.lock
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # debug build: arithmetic overflow checks and debug_assert! are on
+      - name: Tests (debug)
+        run: cargo test --workspace
+
+      # the profile the benchmarks use (LTO, opt-level 3)
+      - name: Tests (release)
+        run: cargo test --workspace --release
+
+      # benches and bins must keep compiling; nothing is timed here
+      - name: Build all targets (release)
+        run: cargo build --workspace --release --all-targets
