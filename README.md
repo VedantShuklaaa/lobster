@@ -137,7 +137,7 @@ Every number in this README so far was measured on one machine:
 | Environment | Used for | Notes |
 |---|---|---|
 | Apple M5 MacBook Air, macOS | all results in this README | no hard core pinning on Apple Silicon (QoS hints only); the `Instant` tick is about 42 ns |
-| AWS EC2 `t3.small`, ap-south-1, Ubuntu 24.04, kernel 6.17 (Intel Xeon Platinum 8259CL @ 2.5 GHz, 2 vCPU = 1 core with 2 hyperthreads, 2 GiB) | CD target, Linux sanity runs | burstable and shared, and both vCPUs are siblings of one core, so it cannot give pinned-core numbers; marked as indicative only |
+| AWS EC2 `t3.small`, ap-south-1, Ubuntu 24.04, kernel 7.0.0-1014-aws (Intel Xeon Platinum 8259CL @ 2.5 GHz, 2 vCPU = 1 core with 2 hyperthreads, 2 GiB) | CD target, Linux sanity runs | burstable and shared, and both vCPUs are siblings of one core, so it cannot give pinned-core numbers; marked as indicative only |
 | AWS EC2, 2+ physical cores, non-burstable (planned, roadmap C) | pinned-core and under-load latency | on-demand instance, terminated after each run |
 
 Results from different environments are never compared in one table. Each Linux result will record the instance type, CPU model, kernel version, and whether threads were pinned. CI runs on GitHub-hosted runners and checks correctness only; its timings are not used.
@@ -278,8 +278,8 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 
 ### Next, in this order
 
-* \[ ] **A. CI**: `fmt`, `clippy`, and tests (debug and release) on every push and PR (GitHub Actions)
-* \[ ] **B. Linux environment**: AWS EC2 instance (Mumbai), and CD from `main` (build in Actions, upload the release binaries over SSH, switch the `current` release)
+* \[x] **A. CI**: `fmt`, `clippy`, and tests (debug and release) on every push and PR (GitHub Actions)
+* \[x] **B. Linux environment**: AWS EC2 instance (Mumbai), and CD from `main` (build in Actions, upload the release binaries over SSH, switch the `current` release)
 * \[ ] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux)
 * \[ ] **D. Static benchmarks page** (Vercel), reading a results JSON written by a manually triggered benchmark workflow
 * \[ ] **E. Live demo**: Rust WebSocket server around the engine, with an order book UI
