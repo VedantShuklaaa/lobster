@@ -1,3 +1,13 @@
+//! Narrow vs wide vs sparse workloads against the current engine.
+//!
+//!   cargo run --release -p bench --bin stress -- v4 15
+//!                                                 |   `- timed replays per workload (default 15)
+//!                                                 `- label for the output (default "engine")
+//!
+//! Prints three markdown tables: what each workload does to the book (deterministic,
+//! identical on every machine), replay throughput (machine-specific), and the cost
+//! of the worst-case best-price scan (machine-specific).
+
 use bench::{Profile, profile, replay_once, worst_case_scan};
 use generator::{GenConfig, generate};
 
@@ -10,6 +20,7 @@ fn main() {
 
     let workloads = [
         ("narrow", GenConfig::narrow()),
+        ("bursty", GenConfig::bursty()),
         ("wide", GenConfig::wide()),
         ("sparse", GenConfig::sparse()),
     ];

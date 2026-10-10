@@ -5,7 +5,7 @@
 //!
 //!   cmd/random   24-byte `Command` stream, generated order   <- what the engine sees
 //!   cmd/sorted   same commands, stable-sorted by type        <- branches become predictable
-//!   tag/random   1-byte tag + 8-byte payload, generated order <- 9 bytes/command instead of 24
+//!   tag/random   1-byte tag + 8-byte payload, generated order <- 9 bytes/command instead of 32
 //!   tag/sorted   same, sorted
 //!   floor        XOR of the payloads, no dispatch            <- loop and memory-read floor
 //!
@@ -15,7 +15,9 @@
 //!                                                  differently, so treat as approximate)
 //!   call + dispatch   = cmd/sorted - floor        (cost when everything is predictable)
 //!
-//!   cargo run --release -p bench --bin dispatch -- [passes]    (default 30)
+//!   cargo run --release -p bench --bin dispatch -- [passes] [preset]
+//!                                                  |         `- narrow (default) | bursty | wide | sparse
+//!                                                  `- timed passes per variant (default 30)
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -126,7 +128,16 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
 
-    let random = generate(&GenConfig::narrow());
+    let preset = std::env::args().nth(2).unwrap_or_else(|| "narrow".into());
+    let cfg = match preset.as_str() {
+        "narrow" => GenConfig::narrow(),
+        "bursty" => GenConfig::bursty(),
+        "wide" => GenConfig::wide(),
+        "sparse" => GenConfig::sparse(),
+        other => panic!("unknown preset {other:?}, expected narrow|bursty|wide|sparse"),
+    };
+    println!("preset: {preset}");
+    let random = generate(&cfg);
     let n = random.len();
     let mut sorted = random.clone();
     sorted.sort_by_key(tag_of); // stable
