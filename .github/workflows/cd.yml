@@ -1,0 +1,94 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# one deploy at a time; a running deploy is never cancelled halfway
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  deploy:
+    # only after CI passed on a push to main, or when started by hand
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    # same OS family as the instance (Ubuntu 24.04), so glibc matches
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --bins
+
+      - name: Stage release
+        run: |
+          mkdir stage
+          for b in stress dispatch latency replay; do
+            cp "target/release/$b" stage/
+          done
+          cp deploy/run-bench.sh stage/
+          echo "$SHA" > stage/COMMIT
+
+      - name: Set up SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Upload and activate
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          SSH="ssh -i $HOME/.ssh/id_deploy -o BatchMode=yes -o StrictHostKeyChecking=yes"
+          REL=/opt/lobster/releases/$SHA
+          $SSH "$USER@$HOST" "mkdir -p $REL"
+          scp -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            stage/* "$USER@$HOST:$REL/"
+          # swap the symlink atomically, then keep only the 5 newest releases
+          $SSH "$USER@$HOST" "
+            chmod +x $REL/*
+            ln -sfn $REL /opt/lobster/current.new &&
+            mv -Tf /opt/lobster/current.new /opt/lobster/current &&
+            cd /opt/lobster/releases && ls -1t | tail -n +6 | xargs -r rm -rf
+          "
+
+      - name: Verify
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$USER@$HOST" '
+            test "$(cat /opt/lobster/current/COMMIT)" = "'"$SHA"'"
+            for b in stress dispatch latency replay; do
+              test -x /opt/lobster/current/$b
+              if ldd /opt/lobster/current/$b | grep -q "not found"; then
+                echo "missing library for $b"; exit 1
+              fi
+            done
+            echo "deployed '"$SHA"'"
+          '
