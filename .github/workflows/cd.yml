@@ -42,7 +42,7 @@ jobs:
       - name: Stage release
         run: |
           mkdir stage
-          for b in stress dispatch latency replay; do
+          for b in stress dispatch latency replay pipeline; do
             cp "target/release/$b" stage/
           done
           cp deploy/run-bench.sh stage/
@@ -84,7 +84,7 @@ jobs:
           ssh -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$USER@$HOST" '
             test "$(cat /opt/lobster/current/COMMIT)" = "'"$SHA"'"
-            for b in stress dispatch latency replay; do
+            for b in stress dispatch latency replay pipeline; do
               test -x /opt/lobster/current/$b
               if ldd /opt/lobster/current/$b | grep -q "not found"; then
                 echo "missing library for $b"; exit 1
