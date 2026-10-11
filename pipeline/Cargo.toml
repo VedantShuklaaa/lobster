@@ -6,5 +6,8 @@ edition = "2024"
 [dependencies]
 engine = { path = "../engine" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 generator = { path = "../generator" }

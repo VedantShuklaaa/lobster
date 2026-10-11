@@ -62,14 +62,21 @@ lobster/
 │   ├── src/book.rs     OrderBook
 │   └── tests/          unit tests + property tests (proptest)
 ├── generator/          deterministic synthetic order streams (seeded RNG, presets)
+├── pipeline/           engine thread behind SPSC rings (the engine itself stays single-threaded)
+│   ├── src/spsc.rs     lock-free single-producer single-consumer ring
+│   ├── src/lib.rs      caller → engine → caller pipeline, batching, wait counters
+│   ├── src/paced.rs    open-loop paced sender for latency measurement
+│   └── src/pin.rs      Linux thread pinning (sched_setaffinity)
 └── bench/              benchmarks and profiling harness
     ├── src/lib.rs      workload profiling and timed replays shared by the bins
     ├── benches/book.rs criterion throughput bench
     └── src/bin/
-        ├── latency.rs  per-op latency percentiles
-        ├── replay.rs   long replay loop for profiling (samply)
-        ├── stress.rs   narrow / wide / sparse / bursty workloads
-        └── dispatch.rs microbench: branch-mispredict cost of the command dispatch
+        ├── latency.rs          per-op latency percentiles
+        ├── replay.rs           long replay loop for profiling (samply)
+        ├── stress.rs           narrow / wide / sparse / bursty workloads
+        ├── dispatch.rs         microbench: branch-mispredict cost of the command dispatch
+        ├── pipeline.rs         throughput through the threaded pipeline, by batch size
+        └── pipeline_latency.rs paced latency percentiles through the pipeline
 ```
 
 ### Data model (v5)
@@ -128,6 +135,8 @@ cargo bench -p bench                                  # replay throughput (crite
 cargo run --release -p bench --bin latency auto       # per-op percentiles
 cargo run --release -p bench --bin stress -- v5 15    # workload shapes + throughput (15 runs)
 cargo run --release -p bench --bin dispatch -- 30     # dispatch microbench (30 passes)
+cargo run --release -p bench --bin pipeline -- narrow 3                    # threaded vs single-thread throughput
+cargo run --release -p bench --bin pipeline_latency -- narrow --repeat 5   # paced latency; add --pin A,B on Linux
 ```
 
 ### Environments
@@ -141,6 +150,8 @@ Every number in this README so far was measured on one machine:
 | AWS EC2, 2+ physical cores, non-burstable (planned, roadmap C) | pinned-core and under-load latency | on-demand instance, terminated after each run |
 
 Results from different environments are never compared in one table. Each Linux result will record the instance type, CPU model, kernel version, and whether threads were pinned. CI runs on GitHub-hosted runners and checks correctness only; its timings are not used.
+
+Pipeline results (roadmap C) will be added after the pinned run on a non-burstable Linux instance; unpinned macOS tails are scheduler noise and are not published.
 
 ### Stress workloads
 
@@ -280,7 +291,7 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 
 * \[x] **A. CI**: `fmt`, `clippy`, and tests (debug and release) on every push and PR (GitHub Actions)
 * \[x] **B. Linux environment**: AWS EC2 instance (Mumbai), and CD from `main` (build in Actions, upload the release binaries over SSH, switch the `current` release)
-* \[ ] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux)
+* \[ ] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux). Done: ring, pipeline, batching, wait counters, paced latency harness (`pipeline_latency`). Remaining: pinned-core run on a non-burstable Linux instance
 * \[ ] **D. Static benchmarks page** (Vercel), reading a results JSON written by a manually triggered benchmark workflow
 * \[ ] **E. Live demo**: Rust WebSocket server around the engine, with an order book UI
 

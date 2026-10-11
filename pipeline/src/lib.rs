@@ -10,6 +10,8 @@
 //! The rings carry the engine's own `Command` and `Event` types unchanged.
 //! The matching engine itself stays single-threaded and unaware of any of this.
 
+pub mod paced;
+pub mod pin;
 pub mod spsc;
 
 use std::hint::spin_loop;
@@ -36,6 +38,10 @@ pub struct Config {
     /// Each ring side publishes its counter every `batch` items. 1 = every
     /// item (lowest latency); larger = fewer cache-line handoffs.
     pub batch: usize,
+    /// Pin the calling thread / the engine thread to this CPU (Linux only;
+    /// elsewhere the request is ignored). `None` = leave scheduling to the OS.
+    pub caller_cpu: Option<usize>,
+    pub engine_cpu: Option<usize>,
 }
 
 impl Default for Config {
@@ -45,11 +51,13 @@ impl Default for Config {
             cmd_ring: 1 << 12,
             evt_ring: 1 << 12,
             batch: 1,
+            caller_cpu: None,
+            engine_cpu: None,
         }
     }
 }
 
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 #[inline]
 fn mix(h: u64, x: u64) -> u64 {
@@ -57,7 +65,7 @@ fn mix(h: u64, x: u64) -> u64 {
 }
 
 #[inline]
-fn hash_event(h: u64, e: &Event) -> u64 {
+pub(crate) fn hash_event(h: u64, e: &Event) -> u64 {
     match *e {
         Event::Fill(f) => {
             let h = mix(h, 0);
@@ -91,7 +99,7 @@ pub fn run_direct(cmds: &[Command], index_capacity: usize) -> Summary {
     }
 }
 
-fn drain(rx: &mut spsc::Consumer<Event>, hash: &mut u64, events: &mut u64) {
+pub(crate) fn drain(rx: &mut spsc::Consumer<Event>, hash: &mut u64, events: &mut u64) {
     while let Some(e) = rx.pop() {
         *hash = hash_event(*hash, &e);
         *events += 1;
@@ -115,7 +123,7 @@ pub struct Stats {
 }
 
 /// Runs one command and pushes its events, waiting while the ring is full.
-fn process(
+pub(crate) fn process(
     book: &mut OrderBook,
     out: &mut Vec<Event>,
     evt_tx: &mut spsc::Producer<Event>,
@@ -157,8 +165,15 @@ pub fn run_pipeline_stats(cmds: &[Command], cfg: Config) -> (Summary, Stats) {
 
     let mut stats = Stats::default();
 
+    if let Some(cpu) = cfg.caller_cpu {
+        let _ = pin::pin_current_thread(cpu);
+    }
+
     thread::scope(|s| {
         let engine = s.spawn(move || {
+            if let Some(cpu) = cfg.engine_cpu {
+                let _ = pin::pin_current_thread(cpu);
+            }
             let mut book = OrderBook::with_capacity(cfg.index_capacity);
             let mut out = Vec::with_capacity(64);
             let (mut idle_polls, mut evt_full_spins) = (0u64, 0u64);
@@ -261,6 +276,7 @@ mod tests {
                         cmd_ring,
                         evt_ring,
                         batch,
+                        ..Config::default()
                     },
                 );
                 assert_eq!(
