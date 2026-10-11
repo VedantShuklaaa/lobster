@@ -14,7 +14,7 @@
 use std::time::Instant;
 
 use generator::GenConfig;
-use pipeline::{Config, Summary, run_direct, run_pipeline};
+use pipeline::{Config, Summary, run_direct, run_pipeline, run_pipeline_stats};
 
 const BATCHES: [usize; 5] = [1, 8, 32, 128, 512];
 
@@ -93,6 +93,26 @@ fn main() {
             v[0],
             v[v.len() - 1],
             med / single
+        );
+    }
+
+    // Who waits on whom. One extra run per batch size; counts are per million
+    // commands. See `pipeline::Stats` for how to read them.
+    println!("\nwaits per million commands (one run each)");
+    println!(
+        "| batch | engine found cmd ring empty | engine found evt ring full | caller found cmd ring full |"
+    );
+    println!(
+        "|-------|-----------------------------|----------------------------|----------------------------|"
+    );
+    let per_m = 1e6 / n;
+    for &batch in BATCHES.iter() {
+        let (_, st) = run_pipeline_stats(&cmds, Config { batch, ..base });
+        println!(
+            "| {batch:<5} | {:>27.0} | {:>26.0} | {:>26.0} |",
+            st.engine_idle_polls as f64 * per_m,
+            st.engine_evt_full_spins as f64 * per_m,
+            st.caller_cmd_full_spins as f64 * per_m,
         );
     }
 }
