@@ -147,7 +147,7 @@ Every number in this README so far was measured on one machine:
 |---|---|---|
 | Apple M5 MacBook Air, macOS | all results in this README | no hard core pinning on Apple Silicon (QoS hints only); the `Instant` tick is about 42 ns |
 | AWS EC2 `t3.small`, ap-south-1, Ubuntu 24.04, kernel 7.0.0-1014-aws (Intel Xeon Platinum 8259CL @ 2.5 GHz, 2 vCPU = 1 core with 2 hyperthreads, 2 GiB) | CD target, Linux sanity runs | burstable and shared, and both vCPUs are siblings of one core, so it cannot give pinned-core numbers; marked as indicative only |
-| AWS EC2, 2+ physical cores, non-burstable (planned, roadmap C) | pinned-core and under-load latency | on-demand instance, terminated after each run |
+| AWS EC2 `c5.xlarge`, ap-south-1, Ubuntu 24.04, kernel 7.0.0-1014-aws (Intel Xeon Platinum 8275CL @ 3.0 GHz, 4 vCPU = 2 cores × 2 hyperthreads) | pipeline latency (roadmap C) | non-burstable VM, no isolated cores; threads pinned to CPUs 0 and 1 (different physical cores) |
 
 Results from different environments are never compared in one table. Each Linux result will record the instance type, CPU model, kernel version, and whether threads were pinned. CI runs on GitHub-hosted runners and checks correctness only; its timings are not used.
 
@@ -169,6 +169,19 @@ The default workload keeps orders within about 20 ticks of the mid, which is the
 `cargo run --release -p bench --bin stress -- <label> 15` prints the workload shape (deterministic, identical on every machine), throughput, and a worst-case scan row. Scan statistics skip the first 10% of commands, because the book starts empty. The scan length is measured from outside the engine, as how far a side's best price moved toward worse prices after a command.
 
 Ghost cancels (cancels of orders that were already filled) are 77% of narrow's cancels and under 5% of wide's and sparse's, so the cancel path does different work in the two regimes.
+
+### Pipeline latency (EC2 c5.xlarge, narrow, 1M commands, median of 5 runs)
+
+The caller sends commands on a fixed schedule through the SPSC rings to the engine thread (batch 1). Latency is the due time to the moment the engine has finished the command and published its events, so queueing delay is included (no coordinated omission). Threads pinned to CPUs 0 and 1 (different physical cores).
+
+| offered M/s | achieved M/s | p50 | p90 | p99 | p99.9 | max |
+|---|---|---|---|---|---|---|
+| 0.5 | 0.50 | 470 ns | 657 ns | 3.5 µs | 13.2 µs | 76 µs |
+| 1.0 | 1.00 | 440 ns | 625 ns | 3.6 µs | 13.5 µs | 76 µs |
+| 2.0 | 2.00 | 393 ns | 557 ns | 4.4 µs | 13.8 µs | 16.6 µs |
+| 5.0 | 5.00 | 466 ns | 727 ns | 7.0 µs | 15.2 µs | 16.9 µs |
+
+At 10 M/s and above the pipeline saturates at about 6.3 M/s, and latency is just queue growth (not quoted). The same run unpinned is within noise of the pinned one, so the tail is not caused by thread migration. Its cause (periodic stalls on a shared VM, possibly) has not been isolated. On a single thread the engine alone runs at 19 M ops/s on the smaller t3.small, so the ceiling is the per-command handoff between the two threads (batch 1), not the engine. Numbers from this instance are not comparable to the M5 tables above.
 
 ### Results
 
@@ -291,7 +304,7 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 
 * \[x] **A. CI**: `fmt`, `clippy`, and tests (debug and release) on every push and PR (GitHub Actions)
 * \[x] **B. Linux environment**: AWS EC2 instance (Mumbai), and CD from `main` (build in Actions, upload the release binaries over SSH, switch the `current` release)
-* \[ ] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux). Done: ring, pipeline, batching, wait counters, paced latency harness (`pipeline_latency`). Remaining: pinned-core run on a non-burstable Linux instance
+* \[x] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux)
 * \[ ] **D. Static benchmarks page** (Vercel), reading a results JSON written by a manually triggered benchmark workflow
 * \[ ] **E. Live demo**: Rust WebSocket server around the engine, with an order book UI
 
