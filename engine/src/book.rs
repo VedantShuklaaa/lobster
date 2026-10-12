@@ -484,6 +484,32 @@ impl OrderBook {
         self.slab.push_back(level, s);
     }
 
+    /// Top `n` non-empty price levels on `side`, best first, as (price, total resting qty).
+    /// Read-only; clears `out` first. Cost is O(n + orders at those levels), so it is meant
+    /// for periodic snapshots, not the per-command hot path.
+    pub fn depth_into(&self, side: Side, n: usize, out: &mut Vec<(Price, u64)>) {
+        out.clear();
+        let ladder = match side {
+            Side::Bid => &self.bids,
+            Side::Ask => &self.asks,
+        };
+        let mut cur = ladder.best;
+        while let Some(p) = cur {
+            if out.len() == n {
+                break;
+            }
+            let mut sum = 0u64;
+            self.walk(ladder.levels[p as usize], |o| sum += o.qty as u64);
+            out.push((p, sum));
+            cur = if ladder.is_bid {
+                ladder.occ.prev_below(p as usize)
+            } else {
+                ladder.occ.next_above(p as usize)
+            }
+            .map(|x| x as Price);
+        }
+    }
+
     // ---- test/debug helpers ----
 
     fn walk(&self, level: Level, mut f: impl FnMut(&Order)) {
@@ -677,5 +703,85 @@ mod occupancy_tests {
             book.apply_into(cmd, &mut out);
             book.check_invariants();
         }
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    /// depth_into must agree with a full scan via qty_at, be ordered best-first,
+    /// and respect `n`, across random commands.
+    #[test]
+    fn depth_matches_scan() {
+        let levels = 200;
+        let mut book = OrderBook::with_config(64, levels);
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
+        let mut id = 1u64;
+        for step in 0..20_000 {
+            let r = next() % 100;
+            let cmd = if r < 40 {
+                Command::Cancel(1 + next() % (id + 1))
+            } else if r < 45 {
+                id += 1;
+                Command::Market {
+                    id,
+                    side: if next() % 2 == 0 {
+                        Side::Bid
+                    } else {
+                        Side::Ask
+                    },
+                    qty: 1 + (next() % 50) as u32,
+                }
+            } else {
+                id += 1;
+                Command::Add(Order {
+                    id,
+                    side: if next() % 2 == 0 {
+                        Side::Bid
+                    } else {
+                        Side::Ask
+                    },
+                    price: (next() % levels as u64) as Price,
+                    qty: 1 + (next() % 100) as u32,
+                })
+            };
+            ev.clear();
+            book.apply_into(cmd, &mut ev);
+
+            if step % 50 != 0 {
+                continue;
+            }
+            for side in [Side::Bid, Side::Ask] {
+                let n = 1 + (next() % 12) as usize;
+                book.depth_into(side, n, &mut out);
+                assert!(out.len() <= n);
+                let want: Vec<(Price, u64)> = {
+                    let mut v: Vec<(Price, u64)> = (0..levels as Price)
+                        .filter_map(|p| {
+                            let q = book.qty_at(side, p) as u64;
+                            (q > 0).then_some((p, q))
+                        })
+                        .collect();
+                    if side == Side::Bid {
+                        v.reverse();
+                    }
+                    v.truncate(n);
+                    v
+                };
+                assert_eq!(out, want, "side {side:?} n {n} step {step}");
+            }
+        }
+        // empty side
+        let empty = OrderBook::with_config(0, 16);
+        empty.depth_into(Side::Bid, 5, &mut out);
+        assert!(out.is_empty());
     }
 }
