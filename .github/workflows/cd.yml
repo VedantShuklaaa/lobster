@@ -7,8 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# id-token lets this job exchange GitHub's signed token for short-lived AWS credentials (no stored keys)
 permissions:
   contents: read
+  id-token: write
 
 # one deploy at a time; a running deploy is never cancelled halfway
 concurrency:
@@ -45,77 +47,50 @@ jobs:
           for b in stress dispatch latency replay pipeline pipeline_latency lobster-server; do
             cp "target/release/$b" stage/
           done
-          cp deploy/run-bench.sh deploy/setup-ec2.sh deploy/lobster-server.service deploy/Caddyfile stage/
+          cp deploy/run-bench.sh deploy/setup-ec2.sh deploy/harden-ec2.sh \
+             deploy/lobster-server.service deploy/Caddyfile stage/
           echo "$SHA" > stage/COMMIT
+          tar -czf release.tgz -C stage .
+          sha256sum release.tgz | cut -d' ' -f1 > release.sha256
 
-      - name: Set up SSH
-        env:
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-arn: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Upload and activate
+      - name: Upload release
         env:
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
+          BUCKET: ${{ vars.DEPLOY_BUCKET }}
         run: |
-          SSH="ssh -i $HOME/.ssh/id_deploy -o BatchMode=yes -o StrictHostKeyChecking=yes"
-          REL=/opt/lobster/releases/$SHA
-          $SSH "$USER@$HOST" "mkdir -p $REL"
-          scp -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            stage/* "$USER@$HOST:$REL/"
-          # swap the symlink atomically, then keep only the 5 newest releases
-          $SSH "$USER@$HOST" "
-            chmod +x $REL/*
-            ln -sfn $REL /opt/lobster/current.new &&
-            mv -Tf /opt/lobster/current.new /opt/lobster/current &&
-            cd /opt/lobster/releases && ls -1t | tail -n +6 | xargs -r rm -rf
-          "
+          aws s3 cp release.tgz "s3://$BUCKET/releases/$SHA.tgz" --no-progress
+          url=$(aws s3 presign "s3://$BUCKET/releases/$SHA.tgz" --expires-in 600)
+          echo "::add-mask::$url"
+          echo "URL=$url" >> "$GITHUB_ENV"
 
-      - name: Verify
+      # The instance has no inbound ports for this: SSM's agent on the box polls AWS and runs the script.
+      - name: Install on the instance
         env:
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
+          INSTANCE: ${{ vars.EC2_INSTANCE_ID }}
         run: |
-          ssh -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "$USER@$HOST" '
-            test "$(cat /opt/lobster/current/COMMIT)" = "'"$SHA"'"
-            for b in stress dispatch latency replay pipeline pipeline_latency lobster-server; do
-              test -x /opt/lobster/current/$b
-              if ldd /opt/lobster/current/$b | grep -q "not found"; then
-                echo "missing library for $b"; exit 1
-              fi
-            done
-            echo "deployed '"$SHA"'"
-          '
-
-      # Restart the live server on the new binary. Skipped, not failed, when the service is not
-      # installed yet (first deploy) or a benchmark is running (it will start the server again itself).
-      - name: Restart live server
-        env:
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
-        run: |
-          ssh -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "$USER@$HOST" '
-            if ! systemctl cat lobster-server >/dev/null 2>&1; then
-              echo "lobster-server is not installed yet: run setup-ec2.sh once"; exit 0
-            fi
-            if [ -e /opt/lobster/bench.lock ]; then
-              echo "benchmark running: leaving the live server alone"; exit 0
-            fi
-            sudo -n systemctl restart lobster-server
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-              if curl -fsS -m 2 http://127.0.0.1:8080/health >/dev/null; then
-                echo "live server healthy on '"$SHA"'"; exit 0
-              fi
-              sleep 1
-            done
-            echo "live server did not become healthy"
-            journalctl -u lobster-server -n 30 --no-pager || true
-            exit 1
-          '
+          sum=$(cat release.sha256)
+          script=$(base64 -w0 deploy/remote-deploy.sh)
+          jq -n --arg s "$script" --arg u "$URL" --arg h "$sum" --arg c "$SHA" \
+            '{commands: [("f=$(mktemp) && echo " + $s + " | base64 -d > \"$f\" && bash \"$f\" " + ($u|@sh) + " " + $h + " " + $c)]}' \
+            > params.json
+          cid=$(aws ssm send-command --instance-ids "$INSTANCE" \
+            --document-name AWS-RunShellScript --comment "lobster deploy ${SHA::7}" \
+            --timeout-seconds 300 --parameters file://params.json \
+            --query Command.CommandId --output text)
+          st=Pending
+          for _ in $(seq 1 90); do
+            st=$(aws ssm get-command-invocation --command-id "$cid" --instance-id "$INSTANCE" \
+                   --query Status --output text 2>/dev/null || echo Pending)
+            case $st in Success|Failed|TimedOut|Cancelled|Cancelling) break ;; esac
+            sleep 4
+          done
+          echo "status: $st"
+          aws ssm get-command-invocation --command-id "$cid" --instance-id "$INSTANCE" \
+            --query StandardOutputContent --output text || true
+          aws ssm get-command-invocation --command-id "$cid" --instance-id "$INSTANCE" \
+            --query StandardErrorContent --output text >&2 || true
+          [ "$st" = Success ]

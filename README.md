@@ -305,8 +305,8 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 * \[x] **A. CI**: `fmt`, `clippy`, and tests (debug and release) on every push and PR (GitHub Actions)
 * \[x] **B. Linux environment**: AWS EC2 instance (Mumbai), and CD from `main` (build in Actions, upload the release binaries over SSH, switch the `current` release)
 * \[x] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux)
-* \[ ] **D. Static benchmarks page** (Vercel), reading a results JSON written by a manually triggered benchmark workflow
-* \[ ] **E. Live demo**: Rust WebSocket server around the engine, with an order book UI
+* \[x] **D. Static benchmarks page** (Vercel), reading a results JSON written by a manually triggered benchmark workflow
+* \[x] **E. Live demo**: Rust WebSocket server around the engine, with an order book UI
 
 ### Later (unordered)
 
