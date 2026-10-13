@@ -1,0 +1,17 @@
+# Public entry point for all project backends: https://api.vedantshukla.in/<project>/...
+# Caddy gets and renews the TLS certificate by itself. WebSockets are proxied with no extra setup.
+api.vedantshukla.in {
+	# /lobster/ws -> 127.0.0.1:8080/ws, /lobster/health -> /health
+	handle_path /lobster/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# A future project goes here:
+	# handle_path /project2/* {
+	#	reverse_proxy 127.0.0.1:8081
+	# }
+
+	handle {
+		respond "not found" 404
+	}
+}

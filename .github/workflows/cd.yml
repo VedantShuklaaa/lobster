@@ -42,10 +42,10 @@ jobs:
       - name: Stage release
         run: |
           mkdir stage
-            for b in stress dispatch latency replay pipeline pipeline_latency; do
+          for b in stress dispatch latency replay pipeline pipeline_latency lobster-server; do
             cp "target/release/$b" stage/
           done
-          cp deploy/run-bench.sh stage/
+          cp deploy/run-bench.sh deploy/setup-ec2.sh deploy/lobster-server.service deploy/Caddyfile stage/
           echo "$SHA" > stage/COMMIT
 
       - name: Set up SSH
@@ -84,11 +84,38 @@ jobs:
           ssh -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$USER@$HOST" '
             test "$(cat /opt/lobster/current/COMMIT)" = "'"$SHA"'"
-              for b in stress dispatch latency replay pipeline pipeline_latency; do
+            for b in stress dispatch latency replay pipeline pipeline_latency lobster-server; do
               test -x /opt/lobster/current/$b
               if ldd /opt/lobster/current/$b | grep -q "not found"; then
                 echo "missing library for $b"; exit 1
               fi
             done
             echo "deployed '"$SHA"'"
+          '
+
+      # Restart the live server on the new binary. Skipped, not failed, when the service is not
+      # installed yet (first deploy) or a benchmark is running (it will start the server again itself).
+      - name: Restart live server
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i "$HOME/.ssh/id_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$USER@$HOST" '
+            if ! systemctl cat lobster-server >/dev/null 2>&1; then
+              echo "lobster-server is not installed yet: run setup-ec2.sh once"; exit 0
+            fi
+            if [ -e /opt/lobster/bench.lock ]; then
+              echo "benchmark running: leaving the live server alone"; exit 0
+            fi
+            sudo -n systemctl restart lobster-server
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if curl -fsS -m 2 http://127.0.0.1:8080/health >/dev/null; then
+                echo "live server healthy on '"$SHA"'"; exit 0
+              fi
+              sleep 1
+            done
+            echo "live server did not become healthy"
+            journalctl -u lobster-server -n 30 --no-pager || true
+            exit 1
           '
