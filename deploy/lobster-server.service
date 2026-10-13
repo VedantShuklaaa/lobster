@@ -1,0 +1,39 @@
+[Unit]
+Description=lobster live server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=lobster
+Group=lobster
+ExecStart=/opt/lobster/current/lobster-server
+
+# Stay up: restart on any exit, start at boot (systemctl enable). Independent of any SSH session.
+Restart=always
+RestartSec=1
+
+# Bind to localhost only. Caddy is the public entry point.
+Environment=BIND=127.0.0.1:8080
+Environment=ALLOWED_ORIGINS=https://projects.vedantshukla.in
+# Must be the word "true": the server parses a bool, "1" would silently mean false.
+Environment=TRUST_PROXY=true
+Environment=SIM_RATE=400
+Environment=RUST_LOG=info
+
+# Open WebSockets would otherwise hold a restart for the default 90 s.
+TimeoutStopSec=5
+
+# Sandboxing and limits
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitNOFILE=4096
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
