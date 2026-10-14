@@ -44,7 +44,7 @@ trust=$(cat <<JSON
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"$oidc"},
  "Action":"sts:AssumeRoleWithWebIdentity",
  "Condition":{"StringEquals":{"token.actions.githubusercontent.com:aud":"sts.amazonaws.com",
-  "token.actions.githubusercontent.com:sub":"repo:$REPO:ref:refs/heads/main"}}}]}
+    "token.actions.githubusercontent.com:sub":"repo:VedantShuklaaa@102453727/lobster@1403710487:ref:refs/heads/main"}}}]}
 JSON
 )
 role=lobster-github-deploy
