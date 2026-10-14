@@ -98,8 +98,10 @@ async fn session(socket: WebSocket, app: Arc<App>, _guard: ConnGuard) {
     };
     let mut alive = send_msg(&mut sink, &hello).await;
     let first = engine.latest();
+    let mut first_sent = None;
     if alive && first.starts_with("{\"type\"") {
         alive = send_text(&mut sink, Utf8Bytes::from(&*first)).await;
+        first_sent = Some(first);
     }
 
     let now = std::time::Instant::now();
@@ -158,7 +160,11 @@ async fn session(socket: WebSocket, app: Arc<App>, _guard: ConnGuard) {
                 alive = send_msg(&mut sink, &reply).await;
             }
             book = book_rx.recv() => match book {
-                Ok(json) => alive = send_text(&mut sink, Utf8Bytes::from(&*json)).await,
+                Ok(json) => {
+                    if first_sent.take_if(|f| Arc::ptr_eq(f, &json)).is_none() {
+                        alive = send_text(&mut sink, Utf8Bytes::from(&*json)).await;
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => {} // skip ahead, the next snapshot is complete
                 Err(broadcast::error::RecvError::Closed) => break,
             },
