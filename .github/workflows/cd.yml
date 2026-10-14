@@ -52,15 +52,7 @@ jobs:
           echo "$SHA" > stage/COMMIT
           tar -czf release.tgz -C stage .
           sha256sum release.tgz | cut -d' ' -f1 > release.sha256
-
-      - name: Debug OIDC claims
-        run: |
-          t=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
-          p=$(echo "$t" | cut -d. -f2 | tr '_-' '/+')
-          while [ $(( ${#p} % 4 )) -ne 0 ]; do p="$p="; done
-          echo "$p" | base64 -d | jq '{sub, aud, ref, repository, event_name}'
-
+          
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
