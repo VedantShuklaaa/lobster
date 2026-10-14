@@ -4,7 +4,7 @@
 
 A limit order book matching engine in Rust, built to explore low-latency systems design: cache-friendly data structures, allocation-free hot paths, and honest measurement.
 
-> Status: v5 (occupancy bitmap for best-price advance) done. Stress workloads (narrow / wide / sparse / bursty) and a dispatch microbenchmark added.
+> Status: v5 engine done, with a pipeline (SPSC), a live WebSocket demo and an SSH-free CD to EC2. Stress workloads (narrow / wide / sparse / bursty) and a dispatch microbenchmark included.
 
 ## What is an order book?
 
@@ -27,7 +27,7 @@ An incoming **buy at 101 for 30** fills 25 at 101, then rests 5 at 101 as the ne
 
 ## Why this project
 
-Matching is the canonical low-latency problem: memory layout, allocation, cache behaviour, and tail latency all matter. The goal is not a full exchange (no networking, auth, or persistence). It is the core engine, built in versions, with each optimisation justified by a profile and a benchmark.
+Matching is the canonical low-latency problem: memory layout, allocation, cache behaviour, and tail latency all matter. The engine is the core, not a full exchange (no auth or persistence); a thin WebSocket server around it powers a live demo. It is the core engine, built in versions, with each optimisation justified by a profile and a benchmark.
 
 ## Architecture
 
@@ -67,6 +67,12 @@ lobster/
 │   ├── src/lib.rs      caller → engine → caller pipeline, batching, wait counters
 │   ├── src/paced.rs    open-loop paced sender for latency measurement
 │   └── src/pin.rs      Linux thread pinning (sched_setaffinity)
+├── server/             live demo: WebSocket server around the engine (axum)
+│   ├── src/engine_thread.rs   engine on its own thread, public book snapshots, per-session replies
+│   ├── src/session.rs         one WebSocket per visitor: origin check, rate limits, validation
+│   ├── src/sim.rs             market simulator that keeps the book moving
+│   └── tests/e2e.rs           end-to-end tests over real sockets
+├── deploy/             systemd unit, Caddyfile, setup/harden scripts, SSM deploy script, AWS bootstrap
 └── bench/              benchmarks and profiling harness
     ├── src/lib.rs      workload profiling and timed replays shared by the bins
     ├── benches/book.rs criterion throughput bench
@@ -272,7 +278,7 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 
 ### Known limits
 
-* All workloads are synthetic. The wide book has a large hole around the mid (uniform offsets), which real books don't.
+* The engine is single-instrument and single-threaded, with no persistence or networking (the live server wraps it with a WebSocket feed).
 * The generated stream draws command types i.i.d. (50/45/5), so about 55% of neighbouring commands differ in type. On the M5 that costs about 2.5 ns per command (roughly a quarter of per-op time) in branch mispredicts alone; real feeds are burstier. The `bursty` preset measures this (118.8 vs 90.3 M ops/s), but how clustered a real feed is has not been measured here.
 * Prices must fit the configured ladder size.
 * Single instrument, single thread, no persistence or networking.
@@ -285,6 +291,25 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 * `Slab::unlink` on wide: 19.5% of the profile
 * `apply_into` dispatch: mostly branch mispredicts on the i.i.d. command mix, about 2.5 ns per command
 * Zero-filling the ladders and bitmaps when a fresh book is created (about 1 MB)
+
+## Live demo
+
+An exchange-style terminal at `projects.vedantshukla.in/lobster/live`: a real engine behind a WebSocket, a simulator keeping the book moving, and visitors trading against it.
+
+```mermaid
+flowchart LR
+    V[browser<br/>Next.js /live] -->|wss| C[Caddy<br/>TLS, api.vedantshukla.in]
+    C -->|127.0.0.1:8080| S[server crate<br/>axum]
+    S -->|std mpsc| E[engine thread<br/>owns the OrderBook]
+    SIM[simulator] --> E
+    E -->|book snapshot every 50 ms| S
+```
+
+* One engine thread owns the book. Sessions send commands over a channel and get their own replies back with `engine_ns` and `queue_ns`, so the latency panel shows engine time, queueing and network round trip separately.
+* Visitors are untrusted: Origin allowlist, 5 connections per IP, token-bucket message rate, quantity cap, price band around the mid, at most 20 open orders each, 5 bad messages and the connection is closed. Visitors cannot cancel each other's orders.
+* The server runs under systemd (restart on failure, sandboxed, 512 MB cap) behind Caddy. `run-bench.sh` stops it during benchmark runs so live traffic never pollutes a measurement.
+* Deploys are SSH-free: GitHub Actions assumes an AWS role through OIDC (only this repo's `main`), uploads the release to a private S3 bucket and runs one SSM command on the instance. The instance has no inbound port 22; IMDSv2 is enforced, security updates install automatically.
+* This is a demo on a small shared VM, not a performance claim: the numbers in the benchmark tables come from the environments listed above.
 
 ## Roadmap
 
@@ -303,10 +328,14 @@ Narrow is 77% ghost cancels. The tag array was meant to make that miss path chea
 ### Next, in this order
 
 * \[x] **A. CI**: `fmt`, `clippy`, and tests (debug and release) on every push and PR (GitHub Actions)
-* \[x] **B. Linux environment**: AWS EC2 instance (Mumbai), and CD from `main` (build in Actions, upload the release binaries over SSH, switch the `current` release)
+* \[x] **B. Linux environment**: AWS EC2 instance (Mumbai), and CD from `main` (build in Actions, release uploaded to S3 and installed through SSM, atomic switch of the `current` release)
 * \[x] **C. Engine thread behind an SPSC ring**, with pinned-core end-to-end latency percentiles under load (Linux)
 * \[x] **D. Static benchmarks page** (Vercel), reading a results JSON written by a manually triggered benchmark workflow
 * \[x] **E. Live demo**: Rust WebSocket server around the engine, with an order book UI
+  * \[x] E1: `server/` crate: engine thread, WebSocket feed, limits
+  * \[x] E2: exchange-style `/live` terminal (Next.js)
+  * \[x] E3: production deploy: systemd + Caddy on `api.vedantshukla.in`, site at `projects.vedantshukla.in/lobster`
+  * \[x] E4: hardening: SSH-free CD (OIDC + S3 + SSM), no inbound port 22, IMDSv2, unattended upgrades, fail2ban
 
 ### Later (unordered)
 
