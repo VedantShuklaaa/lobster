@@ -14,22 +14,25 @@ use axum::routing::get;
 
 use config::Config;
 use engine_thread::EngineHandle;
-use limits::ConnTracker;
+use limits::{ConnRate, ConnTracker};
 
 pub struct App {
     pub cfg: Config,
     pub engine: EngineHandle,
     pub tracker: Arc<ConnTracker>,
+    pub conn_rate: Arc<ConnRate>,
 }
 
 /// Starts the engine thread and returns the shared state.
 pub fn start(cfg: Config) -> Arc<App> {
     let engine = engine_thread::spawn(&cfg);
     let tracker = ConnTracker::new(cfg.max_conns, cfg.max_conns_per_ip);
+    let conn_rate = ConnRate::new(cfg.conn_rate, cfg.conn_burst);
     Arc::new(App {
         cfg,
         engine,
         tracker,
+        conn_rate,
     })
 }
 

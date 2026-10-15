@@ -27,6 +27,10 @@ pub struct Config {
     pub idle_secs: u64,
     pub max_msg_bytes: usize,
     pub max_inflight: usize,
+
+    /// New connection attempts per second per IP (sustained) and the burst allowed.
+    pub conn_rate: f64,
+    pub conn_burst: f64,
 }
 
 impl Default for Config {
@@ -50,6 +54,8 @@ impl Default for Config {
             idle_secs: 300,
             max_msg_bytes: 512,
             max_inflight: 4_096,
+            conn_rate: 0.5,
+            conn_burst: 10.0,
         }
     }
 }
@@ -79,6 +85,8 @@ impl Config {
             sim_seed: env("SIM_SEED", d.sim_seed),
             max_conns: env("MAX_CONNS", d.max_conns),
             max_conns_per_ip: env("MAX_CONNS_PER_IP", d.max_conns_per_ip),
+            conn_rate: env("CONN_RATE", d.conn_rate),
+            conn_burst: env("CONN_BURST", d.conn_burst),
             max_open_orders: env("MAX_OPEN_ORDERS", d.max_open_orders),
             ..d
         }

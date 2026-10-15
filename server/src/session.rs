@@ -32,18 +32,18 @@ fn origin_ok(cfg: &Config, headers: &HeaderMap) -> bool {
 }
 
 /// Behind Caddy the peer is always localhost; Caddy appends the real client to
-/// X-Forwarded-For, so the last entry is the one we can trust.
-fn client_ip(cfg: &Config, headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
-    if cfg.trust_proxy
-        && let Some(ip) = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.rsplit(',').next())
-            .and_then(|s| s.trim().parse().ok())
-    {
-        return ip;
+/// X-Forwarded-For, so the last entry is the one we can trust. With `trust_proxy` on, a request
+/// without a usable entry is refused (`None`) rather than falling back to the peer address, which
+/// would put every such client in one shared bucket.
+fn client_ip(cfg: &Config, headers: &HeaderMap, peer: SocketAddr) -> Option<IpAddr> {
+    if !cfg.trust_proxy {
+        return Some(peer.ip());
     }
-    peer.ip()
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit(',').next())
+        .and_then(|s| s.trim().parse().ok())
 }
 
 pub async fn ws_handler(
@@ -55,7 +55,14 @@ pub async fn ws_handler(
     if !origin_ok(&app.cfg, &headers) {
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
-    let ip = client_ip(&app.cfg, &headers, peer);
+    let Some(ip) = client_ip(&app.cfg, &headers, peer) else {
+        return (StatusCode::BAD_REQUEST, "missing client address").into_response();
+    };
+
+    if !app.conn_rate.allow(ip, std::time::Instant::now()) {
+        return (StatusCode::TOO_MANY_REQUESTS, "slow down").into_response();
+    }
+
     let Some(guard) = app.tracker.try_acquire(ip) else {
         return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response();
     };
