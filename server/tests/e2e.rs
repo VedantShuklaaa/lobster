@@ -18,6 +18,7 @@ fn test_cfg() -> Config {
         msg_rate: 1_000.0,
         msg_burst: 1_000.0,
         max_conns_per_ip: 50,
+        conn_burst: 1_000.0,
         ..Config::default()
     }
 }
@@ -352,4 +353,31 @@ async fn live_simulator_keeps_the_book_moving() {
         .book_where(|v| v["stats"]["cmds_per_sec"].as_u64().unwrap() > 1_000)
         .await;
     assert!(later["stats"]["cmds_total"].as_u64().unwrap() > 100);
+}
+
+#[tokio::test]
+async fn connection_attempts_are_rate_limited() {
+    let mut cfg = test_cfg();
+    cfg.conn_burst = 3.0;
+    cfg.conn_rate = 0.001;
+    let addr = start(cfg).await;
+    for _ in 0..3 {
+        drop(Client::connect(addr).await);
+    }
+    assert!(
+        connect_async(format!("ws://{addr}/ws")).await.is_err(),
+        "fourth attempt inside the burst window"
+    );
+}
+
+#[tokio::test]
+async fn trusted_proxy_without_forwarded_for_is_refused() {
+    let mut cfg = test_cfg();
+    cfg.trust_proxy = true;
+    let addr = start(cfg).await;
+    assert!(connect_async(format!("ws://{addr}/ws")).await.is_err());
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("X-Forwarded-For", "203.0.113.7".parse().unwrap());
+    assert!(connect_async(req).await.is_ok());
 }

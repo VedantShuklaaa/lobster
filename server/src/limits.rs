@@ -56,6 +56,41 @@ impl Drop for ConnGuard {
     }
 }
 
+/// Limits how fast one IP may *open* connections (accepted or not), so a script cannot churn
+/// through the connection cap or burn CPU on upgrades. The cap in `ConnTracker` limits how many
+/// are open at once; this limits how often a new one may be attempted.
+pub struct ConnRate {
+    rate: f64,
+    burst: f64,
+    inner: Mutex<HashMap<IpAddr, TokenBucket>>,
+}
+
+/// Above this many tracked IPs, idle entries are dropped so the map cannot grow without bound.
+const CONN_RATE_PRUNE_AT: usize = 10_000;
+
+impl ConnRate {
+    pub fn new(rate: f64, burst: f64) -> Arc<Self> {
+        Arc::new(Self {
+            rate,
+            burst,
+            inner: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn allow(&self, ip: IpAddr, now: Instant) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        if map.len() >= CONN_RATE_PRUNE_AT {
+            // a bucket idle long enough to be full again carries no information
+            let idle =
+                std::time::Duration::from_secs_f64((self.burst / self.rate.max(1e-9)).max(1.0));
+            map.retain(|_, b| now.saturating_duration_since(b.last) < idle);
+        }
+        map.entry(ip)
+            .or_insert_with(|| TokenBucket::new(self.rate, self.burst, now))
+            .allow(now)
+    }
+}
+
 /// Classic token bucket: `rate` tokens per second up to `burst`.
 pub struct TokenBucket {
     tokens: f64,
@@ -103,6 +138,17 @@ mod tests {
         assert!(b.allow(t1));
         assert!(b.allow(t1));
         assert!(!b.allow(t1));
+    }
+
+    #[test]
+    fn conn_rate_limits_per_ip_and_refills() {
+        let t0 = Instant::now();
+        let r = ConnRate::new(1.0, 3.0);
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+        assert_eq!((0..5).filter(|_| r.allow(a, t0)).count(), 3);
+        assert!(r.allow(b, t0), "other IPs are unaffected");
+        assert!(r.allow(a, t0 + Duration::from_secs(2)), "refills over time");
     }
 
     #[test]

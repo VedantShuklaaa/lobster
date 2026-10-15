@@ -306,7 +306,8 @@ flowchart LR
 ```
 
 * One engine thread owns the book. Sessions send commands over a channel and get their own replies back with `engine_ns` and `queue_ns`, so the latency panel shows engine time, queueing and network round trip separately.
-* Visitors are untrusted: Origin allowlist, 5 connections per IP, token-bucket message rate, quantity cap, price band around the mid, at most 20 open orders each, 5 bad messages and the connection is closed. Visitors cannot cancel each other's orders.
+* Visitors are untrusted: Origin allowlist, 5 open connections per IP and a per-IP limit on how fast new ones can be opened, token-bucket message rate, quantity cap, price band around the mid, at most 20 open orders each, 5 bad messages and the connection is closed. Visitors cannot cancel each other's orders.
+* With `TRUST_PROXY` on, a request that arrives without `X-Forwarded-For` is refused instead of being counted under the proxy's address. `deploy/aws-alarms.sh` sets up CPU and status-check alarms and a monthly budget alert by email.
 * The server runs under systemd (restart on failure, sandboxed, 512 MB cap) behind Caddy. `run-bench.sh` stops it during benchmark runs so live traffic never pollutes a measurement.
 * Deploys are SSH-free: GitHub Actions assumes an AWS role through OIDC (only this repo's `main`), uploads the release to a private S3 bucket and runs one SSM command on the instance. The instance has no inbound port 22; IMDSv2 is enforced, security updates install automatically.
 * This is a demo on a small shared VM, not a performance claim: the numbers in the benchmark tables come from the environments listed above.
